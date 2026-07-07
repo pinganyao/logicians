@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 
-from .midi_io import NOTE_NAMES, estimate_loop_bars, group_notes_by_track
+from .midi_io import NOTE_NAMES, estimate_loop_bars, group_notes_by_track, split_mixed_harmony_notes
 from .models import ChordEvent, LoopContext, NoteEvent
 
 MAJOR_SCALE = {0, 2, 4, 5, 7, 9, 11}
@@ -277,6 +277,55 @@ def _score_chord_candidate(
     return score
 
 
+def _resolve_harmony_tracks(
+    tracks: dict[str, list[NoteEvent]],
+) -> tuple[list[NoteEvent], list[NoteEvent]]:
+    """Return (chord_notes, bass_notes), splitting mixed live capture when needed."""
+    chord_notes = list(tracks.get("chords", []))
+    bass_notes = list(tracks.get("bass", []))
+    if chord_notes or bass_notes:
+        return chord_notes, bass_notes
+
+    pooled: list[NoteEvent] = []
+    for role, notes in tracks.items():
+        if role in ("drums", "melody_reference"):
+            continue
+        pooled.extend(notes)
+
+    if not pooled:
+        return [], []
+
+    return split_mixed_harmony_notes(pooled)
+
+
+def _fallback_chord_quality(
+    root: int,
+    weights: dict[int, float],
+    key_root: int,
+    key_mode: str,
+) -> str:
+    if _has_extension(weights, root, 11):
+        return "maj7"
+    if _has_extension(weights, root, 10):
+        if key_mode == "major":
+            diatonic = _diatonic_chords_in_major(key_root)
+            if root in diatonic and "dom7" in diatonic[root]:
+                return "dom7"
+            if root in diatonic and "min7" in diatonic[root]:
+                return "min7"
+        return "min7"
+    if key_mode == "major":
+        diatonic = _diatonic_chords_in_major(key_root)
+        if root in diatonic:
+            quals = diatonic[root]
+            if "minor" in quals and "major" not in quals:
+                return "minor"
+            return "major"
+    if root in _rotate_scale(NATURAL_MINOR_SCALE, key_root):
+        return "minor"
+    return "major"
+
+
 def infer_chord_for_bar(
     bar: int,
     chord_notes: list[NoteEvent],
@@ -293,11 +342,16 @@ def infer_chord_for_bar(
     if bar_bass:
         bass_pc = min(bar_bass, key=lambda n: n.pitch).pitch % 12
 
+    root_candidates = list(range(12))
+    if bass_pc is not None:
+        # Pop loops are usually root-position — search bass root first.
+        root_candidates = [bass_pc] + [r for r in range(12) if r != bass_pc]
+
     best_score = -1.0
-    best_root = key_root
+    best_root = bass_pc if bass_pc is not None else key_root
     best_quality = "major"
 
-    for root in range(12):
+    for root in root_candidates:
         for quality in ("maj7", "min7", "dom7", "major", "minor"):
             score = _score_chord_candidate(
                 bar_weights, root, quality, bass_pc, scale, key_root, key_mode
@@ -308,15 +362,13 @@ def infer_chord_for_bar(
                 best_quality = quality
 
     if best_score < 0.5:
-        best_root = bass_pc if bass_pc is not None else key_root
-        if _has_extension(bar_weights, best_root, 11):
-            best_quality = "maj7"
-        elif _has_extension(bar_weights, best_root, 10):
-            best_quality = "min7"
-        elif best_root in _rotate_scale(NATURAL_MINOR_SCALE, key_root):
-            best_quality = "minor"
+        if bass_pc is not None:
+            best_root = bass_pc
+        elif bar_weights:
+            best_root = max(bar_weights, key=bar_weights.get)
         else:
-            best_quality = "major"
+            best_root = key_root
+        best_quality = _fallback_chord_quality(best_root, bar_weights, key_root, key_mode)
 
     pitch_classes = _chord_template(best_root, best_quality)
     return ChordEvent(
@@ -336,8 +388,7 @@ def infer_chords(
     scale: set[int],
     key_mode: str = "major",
 ) -> list[ChordEvent]:
-    chord_notes = tracks.get("chords", [])
-    bass_notes = tracks.get("bass", [])
+    chord_notes, bass_notes = _resolve_harmony_tracks(tracks)
     return [
         infer_chord_for_bar(bar, chord_notes, bass_notes, key_root, scale, key_mode)
         for bar in range(1, bars + 1)
@@ -345,7 +396,7 @@ def infer_chords(
 
 
 def bass_roots_by_bar(tracks: dict[str, list[NoteEvent]], bars: int) -> dict[int, int]:
-    bass_notes = tracks.get("bass", [])
+    _, bass_notes = _resolve_harmony_tracks(tracks)
     result: dict[int, int] = {}
     for bar in range(1, bars + 1):
         bar_notes = [n for n in bass_notes if n.bar == bar]

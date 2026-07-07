@@ -76,14 +76,24 @@ python -m logicians.cli play \
 
 ### Live capture
 
+The capture clock does **not** start when you run the command. Switch to Logic first, then press Play — capture begins on the first MIDI note (or when you press Enter with `--sync enter`). It records exactly `--bars` of musical time.
+
 ```bash
 python -m logicians.cli live \
   --midi-input "IAC Driver Bus 1" \
-  --midi-output "IAC Driver Bus 1" \
+  --midi-output "IAC Driver Bus 2" \
   --tempo 120 \
-  --bars 4 \
-  --capture-seconds 8
+  --bars 4
 ```
+
+Workflow:
+1. Run the command — it waits (no timer yet)
+2. Switch to Logic and press Play
+3. **Loop 1** — first MIDI note syncs to bar 1; loop is captured
+4. **Loop 2** — buffer while the melody is generated
+5. **Loop 3** — generated melody enters, synced to bar 1
+
+Use `--playback-loop 4` to delay entry further, or `--sync enter` to sync manually.
 
 ## Architecture
 
@@ -105,6 +115,8 @@ The `MelodyGenerator` protocol allows swapping the rule-based generator for a fu
 | `ports` | List MIDI I/O ports |
 | `play` | Generate and send melody live |
 | `live` | Capture loop and play generated melody |
+
+Use `--key` to match Logic's project key (e.g. `--key Am`, `--key D`). When set, the melody is strictly diatonic to that key — no chromatic passing tones.
 
 ## Testing
 

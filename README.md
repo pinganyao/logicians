@@ -79,9 +79,13 @@ Workflow:
 2. Switch to Logic and press Play
 3. **Loop 1** — first MIDI note syncs to bar 1; loop is captured
 4. **Loop 2** — buffer while the melody is generated
-5. **Loop 3** — generated melody enters, synced to bar 1
+5. **Loop 3+** — generated melody enters; each cycle is a **fresh improvisation** that connects smoothly to where the last loop ended, until you press Ctrl+C
 
-Use `--playback-loop 4` to delay entry further, or `--sync enter` to sync manually.
+Use `--once` to play only the first melody. Use `--sync enter` to sync manually.
+
+Pass `--key F` (or your project key) so analysis and melody generation match Logic. After capture, the CLI prints the detected chord progression — verify it before improvising.
+
+Live capture splits bass (notes below E3) from harmony automatically. Keep bass in a low register on a separate MIDI stream if possible.
 
 ## Architecture
 

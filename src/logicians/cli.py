@@ -18,7 +18,7 @@ from .midi_io import (
     loop_duration_seconds,
     parse_midi_file,
 )
-from .models import GenerationOptions
+from .models import GenerationOptions, MelodyClip, LoopContext
 from .scheduler import MidiScheduler, StartMode
 
 app = typer.Typer(name="logicians", help="AI-assisted melody improviser for Logic Pro")
@@ -32,6 +32,24 @@ def _parse_track_mapping(mapping: Optional[str]) -> dict[str, str] | None:
 
 def _build_context(notes, tempo, time_sig, ppq, bars=None, key=None):
     return build_loop_context(notes, tempo, time_sig, ppq, bars=bars, key=key)
+
+
+def _echo_detected_context(context: LoopContext, *, key_override: str | None = None) -> None:
+    """Print key and chord progression inferred from captured material."""
+    key_label = f"{NOTE_NAMES[context.key_root]} {context.key_mode}"
+    if key_override:
+        key_label += " (override)"
+    elif context.key_enforced:
+        key_label += " (enforced)"
+    typer.echo(f"Detected key: {key_label}")
+    typer.echo("Detected chords:")
+    if not context.chords:
+        typer.echo("  (none)")
+        return
+    for chord in context.chords:
+        typer.echo(f"  Bar {chord.bar}: {chord.name}")
+    progression = " → ".join(chord.name for chord in context.chords)
+    typer.echo(f"  {progression}")
 
 
 @app.command()
@@ -54,9 +72,8 @@ def analyze(
     typer.echo("\nTracks:")
     for name, track_notes in context.tracks.items():
         typer.echo(f"  {name}: {len(track_notes)} notes")
-    typer.echo("\nChord progression:")
-    for chord in context.chords:
-        typer.echo(f"  Bar {chord.bar}: {chord.name}")
+    typer.echo()
+    _echo_detected_context(context, key_override=key)
     typer.echo("\nBass roots by bar:")
     for bar, root in sorted(context.bass_roots_by_bar.items()):
         typer.echo(f"  Bar {bar}: {NOTE_NAMES[root]}")
@@ -155,6 +172,11 @@ def live(
         help="Which loop cycle the melody enters on (default 3: loop 1=capture, loop 2=generate)",
     ),
     key: Optional[str] = typer.Option(None, "--key", help="Override key, e.g. C, Am, F# minor"),
+    continuous: bool = typer.Option(
+        True,
+        "--continuous/--once",
+        help="Keep improvising a new melody each loop (default) or play only once",
+    ),
 ) -> None:
     """Capture a live MIDI loop and output generated melody."""
     num, denom = time_signature.split("/")
@@ -173,6 +195,7 @@ def live(
                 f"Capture starts on the first MIDI note, records {bars} bars "
                 f"({duration_sec:.1f}s at {tempo:.0f} BPM).\n"
                 f"Melody will enter on loop {playback_loop}."
+                + (" Press Ctrl+C to stop improvising." if continuous else "")
             )
         else:
             typer.echo(
@@ -186,25 +209,57 @@ def live(
         typer.echo(f"Captured {len(notes)} notes")
 
         context = _build_context(notes, tempo, time_sig, 480, bars=bars, key=key)
-        generator = RuleBasedMelodyGenerator()
-        options = GenerationOptions(seed=seed, density=density)
-        clip = generator.generate(context, options)
+        typer.echo()
+        _echo_detected_context(context, key_override=key)
+        typer.echo()
 
-        # Loop 1 = capture, loop 2 = generation buffer, melody enters at playback_loop.
-        loops_before_playback = (playback_loop - 1) + count_in
-        playback_start = sync_time + loops_before_playback * duration_sec
+        generator = RuleBasedMelodyGenerator()
+        base_options = GenerationOptions(seed=seed, density=density)
+        clip = generator.generate(context, base_options)
 
         scheduler = MidiScheduler(midi_out, context)
-        typer.echo(
-            f"Playing generated melody ({len(clip.notes)} notes) "
-            f"aligned to loop {playback_loop}..."
-        )
-        scheduler.play(
-            clip,
-            start_mode=StartMode.IMMEDIATELY,
-            seed=seed,
-            start_at=playback_start,
-        )
+
+        if continuous:
+            typer.echo(
+                f"Improvising from loop {playback_loop} — each cycle connects smoothly to the last. "
+                f"Press Ctrl+C to stop."
+            )
+
+            def make_clip(iteration: int, previous: MelodyClip) -> MelodyClip:
+                opts = GenerationOptions(
+                    seed=None if seed is None else seed + iteration,
+                    density=density,
+                    previous_clip=previous,
+                    iteration=iteration,
+                )
+                return generator.generate(context, opts)
+
+            def on_loop(loop_num: int, playing: MelodyClip) -> None:
+                typer.echo(f"Loop {loop_num}: playing {len(playing.notes)} notes")
+
+            scheduler.play_improvisation(
+                initial_clip=clip,
+                clip_factory=make_clip,
+                sync_time=sync_time,
+                loop_duration_sec=duration_sec,
+                first_playback_loop=playback_loop + count_in,
+                seed=seed,
+                on_loop_start=on_loop,
+            )
+            typer.echo("Stopped.")
+        else:
+            loops_before_playback = (playback_loop - 1) + count_in
+            playback_start = sync_time + loops_before_playback * duration_sec
+            typer.echo(
+                f"Playing generated melody ({len(clip.notes)} notes) "
+                f"aligned to loop {playback_loop}..."
+            )
+            scheduler.play(
+                clip,
+                start_mode=StartMode.IMMEDIATELY,
+                seed=seed,
+                start_at=playback_start,
+            )
     finally:
         midi_in.close()
         midi_out.close()

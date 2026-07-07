@@ -112,6 +112,35 @@ def test_infer_chord_c_major():
     assert chord.quality in ("major", "maj7")
 
 
+def test_infer_f_major_progression_from_mixed_capture():
+    """Gm -> Bb -> Dm -> C in F major, as captured on a single live MIDI stream."""
+    def bar(bar_num: int, bass_pitch: int, harmony: list[int]) -> list[NoteEvent]:
+        start = (bar_num - 1) * 4
+        notes = [
+            NoteEvent("capture", bass_pitch, 95, start, 4.0, bar_num, Fraction(0), Fraction(4)),
+        ]
+        notes.extend(
+            NoteEvent("capture", p, 80, start, 4.0, bar_num, Fraction(0), Fraction(4))
+            for p in harmony
+        )
+        return notes
+
+    notes = (
+        bar(1, 43, [58, 62, 67])   # Gm: G bass, Bb-D-G
+        + bar(2, 46, [58, 62, 65])  # Bb: Bb bass, Bb-D-F
+        + bar(3, 38, [62, 65, 69])  # Dm: D bass, D-F-A
+        + bar(4, 36, [60, 64, 67])  # C: C bass, C-E-G
+    )
+    context = build_loop_context(notes, 120.0, (4, 4), 480, bars=4, key="F")
+    names = [c.name for c in context.chords]
+    roots = [c.root for c in context.chords]
+    assert roots == [7, 10, 2, 0]
+    assert names[0] in ("Gm", "Gm7")
+    assert names[1] in ("Bb", "Bbmaj7", "A#", "A#maj7")
+    assert names[2] in ("Dm", "Dm7")
+    assert names[3] in ("C", "Cmaj7")
+
+
 def test_build_loop_context():
     notes = _make_c_major_triad(1) + [
         NoteEvent("bass", 48, 90, 0, 4.0, 1, Fraction(0), Fraction(4)),
