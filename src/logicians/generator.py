@@ -21,22 +21,25 @@ PhraseSection = Literal["A", "A_prime", "B", "B_prime", "C", "C_prime", "D", "re
 
 DENSITY_PRESETS = {
     "sparse": {
-        "notes_per_bar": (2, 5),
-        "durations": [Fraction(1, 1), Fraction(3, 2), Fraction(2, 1)],
-        "rest_prob": 0.45,
-        "fast_note_prob": 0.05,
+        "notes_per_bar": (6, 10),
+        "durations": [Fraction(1, 2), Fraction(1, 4), Fraction(1, 1)],
+        "rest_prob": 0.15,
+        "fast_note_prob": 0.35,
+        "cell_size": Fraction(1, 4),
     },
     "medium": {
-        "notes_per_bar": (5, 9),
-        "durations": [Fraction(1, 2), Fraction(1, 1), Fraction(3, 4), Fraction(1, 4)],
-        "rest_prob": 0.25,
-        "fast_note_prob": 0.15,
+        "notes_per_bar": (12, 20),
+        "durations": [Fraction(1, 2), Fraction(1, 4), Fraction(1, 8), Fraction(1, 1)],
+        "rest_prob": 0.04,
+        "fast_note_prob": 0.65,
+        "cell_size": Fraction(1, 8),
     },
     "busy": {
-        "notes_per_bar": (8, 16),
-        "durations": [Fraction(1, 2), Fraction(1, 4), Fraction(1, 6), Fraction(1, 8)],
-        "rest_prob": 0.10,
-        "fast_note_prob": 0.35,
+        "notes_per_bar": (16, 28),
+        "durations": [Fraction(1, 4), Fraction(1, 8), Fraction(1, 2)],
+        "rest_prob": 0.02,
+        "fast_note_prob": 0.80,
+        "cell_size": Fraction(1, 8),
     },
 }
 
@@ -121,12 +124,7 @@ class RuleBasedMelodyGenerator:
         return MelodyClip(bars=context.bars, notes=notes)
 
     def _resolve_density(self, options: GenerationOptions, context: LoopContext) -> str:
-        density = options.density
-        if context.rhythm_density > 0.7 and density == "medium":
-            return "sparse"
-        if context.rhythm_density < 0.3 and density == "medium":
-            return "busy"
-        return density
+        return options.density
 
     def _plan_phrase(
         self, context: LoopContext, options: GenerationOptions, rng: random.Random
@@ -152,11 +150,11 @@ class RuleBasedMelodyGenerator:
         peak_position = Fraction(rng.choice([1, 2, 3]), 2)
 
         if options.density == "sparse":
-            entry = Fraction(2)
+            entry = Fraction(1, 2)
         elif options.density == "busy":
-            entry = Fraction(7, 8) if rng.random() < 0.5 else Fraction(0)
+            entry = Fraction(0)
         else:
-            entry = Fraction(rng.choice([0, 1, 1, 2]), 2)
+            entry = Fraction(0)
 
         return PhrasePlan(
             sections=sections,
@@ -186,17 +184,25 @@ class RuleBasedMelodyGenerator:
     ) -> Motif:
         chord = self._chord_at_bar(context, 1)
         anchor = self._pick_chord_tone(chord, context, options, rng, register_center=True)
-        num_notes = rng.randint(2, 4)
+        num_notes = rng.randint(4, 8)
         intervals = [0]
         current = anchor
         for _ in range(num_notes - 1):
             if context.key_enforced:
-                next_pitch = self._pick_scale_neighbor(current, context, options, rng)
+                step = rng.choice([-2, -1, 1, 2])
+                next_pitch = self._pick_scale_neighbor(
+                    current, context, options, rng, max_steps=max(1, abs(step))
+                )
+                if step < 0 and next_pitch >= current:
+                    next_pitch = self._scale_step(current, -1, context, options)
+                elif step > 0 and next_pitch <= current:
+                    next_pitch = self._scale_step(current, 1, context, options)
                 intervals.append(next_pitch - current)
                 current = next_pitch
             else:
-                intervals.append(rng.choice([-2, -1, 1, 2, 3, -3, 4, -4]))
-        durations = [rng.choice(preset["durations"]) for _ in range(num_notes)]
+                intervals.append(rng.choice([-2, -1, 1, 2]))
+        fast = [Fraction(1, 8), Fraction(1, 4), Fraction(1, 8), Fraction(1, 8)]
+        durations = [fast[i % len(fast)] for i in range(num_notes)]
         return Motif(intervals=intervals, durations=durations, anchor_pitch=anchor)
 
     def _chord_at_bar(self, context: LoopContext, bar: int) -> ChordEvent:
@@ -224,77 +230,232 @@ class RuleBasedMelodyGenerator:
         beats_per_bar: int,
         is_first_bar: bool,
     ) -> list[MelodyNote]:
-        rng = state.rng
-        target_count = rng.randint(*preset["notes_per_bar"])
-
-        if section in ("A_prime", "B_prime", "C_prime"):
-            target_count = max(2, target_count - rng.randint(0, 2))
-        if section == "resolution":
-            target_count = max(2, target_count - 1)
-
-        positions = self._choose_positions(
-            bar, target_count, preset, accent_map, beats_per_bar, rng, section
-        )
-
         if section == "A" and is_first_bar:
-            return self._motif_to_notes(motif, bar, chord, context, options, state, phrase_plan, section)
+            motif_notes = self._motif_to_notes(
+                motif, bar, chord, context, options, state, phrase_plan, section
+            )
+            cursor = motif_notes[-1].position + motif_notes[-1].duration if motif_notes else Fraction(0)
+            tail = self._fill_bar_from(
+                bar, cursor, beats_per_bar, chord, next_chord, context, options,
+                preset, phrase_plan, state, section, accent_map,
+            )
+            return motif_notes + tail
 
         if section == "A_prime":
-            return self._vary_motif(motif, bar, chord, context, options, state, phrase_plan, section)
-
-        notes: list[MelodyNote] = []
-        for i, pos in enumerate(positions):
-            is_strong = pos in (Fraction(0), Fraction(2)) or i == len(positions) - 1
-            is_ending = section == "resolution" and i == len(positions) - 1
-            is_peak = bar == phrase_plan.peak_bar and pos == phrase_plan.peak_position
-
-            pitch = self._choose_pitch(
-                chord, next_chord, context, options, state,
-                is_strong=is_strong, is_ending=is_ending, is_peak=is_peak,
-                bar=bar, section=section, phrase_plan=phrase_plan,
+            motif_notes = self._vary_motif(
+                motif, bar, chord, context, options, state, phrase_plan, section
             )
-            duration = self._choose_duration(preset, rng, is_ending, state)
-            velocity = self._choose_velocity(rng, is_strong, is_peak, is_ending, section)
+            if motif_notes:
+                last = motif_notes[-1]
+                cursor = last.position + last.duration
+            else:
+                cursor = Fraction(0)
+            tail = self._fill_bar_from(
+                bar, cursor, beats_per_bar, chord, next_chord, context, options,
+                preset, phrase_plan, state, section, accent_map,
+            )
+            return motif_notes + tail
 
-            notes.append(MelodyNote(
-                pitch=pitch, velocity=velocity, bar=bar,
-                position=pos, duration=duration,
-            ))
-            state.last_pitch = pitch
+        return self._fill_bar_from(
+            bar, Fraction(0), beats_per_bar, chord, next_chord, context, options,
+            preset, phrase_plan, state, section, accent_map,
+        )
+
+    def _fill_bar_from(
+        self,
+        bar: int,
+        start_pos: Fraction,
+        beats_per_bar: int,
+        chord: ChordEvent,
+        next_chord: ChordEvent,
+        context: LoopContext,
+        options: GenerationOptions,
+        preset: dict,
+        phrase_plan: PhrasePlan,
+        state: _GenState,
+        section: PhraseSection,
+        accent_map: dict[Fraction, float],
+    ) -> list[MelodyNote]:
+        rng = state.rng
+        notes: list[MelodyNote] = []
+        cursor = start_pos
+        is_resolution = section == "resolution"
+        bar_end = Fraction(beats_per_bar)
+
+        while cursor < bar_end - Fraction(1, 16):
+            remaining = bar_end - cursor
+            if is_resolution and remaining <= Fraction(1, 2):
+                notes.append(self._make_sustained_note(
+                    bar, cursor, remaining, chord, next_chord, context, options,
+                    state, phrase_plan, section, is_ending=True,
+                ))
+                break
+
+            roll = rng.random()
+            if roll < 0.38:
+                chunk, cursor = self._make_scalic_run(
+                    bar, cursor, bar_end, chord, next_chord, context, options,
+                    state, phrase_plan, section, accent_map,
+                )
+                notes.extend(chunk)
+            elif roll < 0.82:
+                chunk, cursor = self._make_quaver_stream(
+                    bar, cursor, bar_end, chord, next_chord, context, options,
+                    state, phrase_plan, section, preset, accent_map,
+                )
+                notes.extend(chunk)
+            else:
+                dur = rng.choice([Fraction(1, 4), Fraction(1, 2), Fraction(1, 1)])
+                dur = min(dur, remaining)
+                notes.append(self._make_sustained_note(
+                    bar, cursor, dur, chord, next_chord, context, options,
+                    state, phrase_plan, section,
+                    is_ending=False,
+                ))
+                cursor += dur
 
         return notes
 
-    def _choose_positions(
+    def _make_scalic_run(
         self,
         bar: int,
-        count: int,
+        cursor: Fraction,
+        bar_end: Fraction,
+        chord: ChordEvent,
+        next_chord: ChordEvent,
+        context: LoopContext,
+        options: GenerationOptions,
+        state: _GenState,
+        phrase_plan: PhrasePlan,
+        section: PhraseSection,
+        accent_map: dict[Fraction, float],
+    ) -> tuple[list[MelodyNote], Fraction]:
+        rng = state.rng
+        cell = Fraction(1, 8) if rng.random() < 0.55 else Fraction(1, 4)
+        if rng.random() < 0.35:
+            cell = Fraction(1, 4) if cell == Fraction(1, 8) else Fraction(1, 8)
+
+        length = rng.randint(4, 8)
+        direction = rng.choice([-1, 1])
+        notes: list[MelodyNote] = []
+        pos = cursor
+        pitch = state.last_pitch or self._pick_chord_tone(
+            chord, context, options, rng, register_center=True
+        )
+
+        for i in range(length):
+            if pos + cell > bar_end:
+                break
+            if i > 0:
+                pitch = self._scale_step(pitch, direction, context, options)
+                if context.key_enforced:
+                    pitch = self._snap_to_scale(pitch, context, options)
+                else:
+                    pitch = self._clamp_register(
+                        pitch + rng.choice([-1, 0, 1]), options
+                    )
+            is_strong = pos in (Fraction(0), Fraction(2))
+            notes.append(MelodyNote(
+                pitch=pitch,
+                velocity=self._choose_velocity(rng, is_strong, False, False, section),
+                bar=bar,
+                position=pos,
+                duration=cell,
+            ))
+            state.last_pitch = pitch
+            pos += cell
+
+        if not notes:
+            return [], cursor + cell
+        return notes, pos
+
+    def _make_quaver_stream(
+        self,
+        bar: int,
+        cursor: Fraction,
+        bar_end: Fraction,
+        chord: ChordEvent,
+        next_chord: ChordEvent,
+        context: LoopContext,
+        options: GenerationOptions,
+        state: _GenState,
+        phrase_plan: PhrasePlan,
+        section: PhraseSection,
         preset: dict,
         accent_map: dict[Fraction, float],
-        beats_per_bar: int,
-        rng: random.Random,
+    ) -> tuple[list[MelodyNote], Fraction]:
+        rng = state.rng
+        if rng.random() < 0.45:
+            cell = Fraction(1, 8)
+        else:
+            cell = Fraction(1, 4)
+
+        length = rng.randint(3, 7)
+        notes: list[MelodyNote] = []
+        pos = cursor
+
+        for i in range(length):
+            if pos + cell > bar_end:
+                break
+            is_strong = pos in (Fraction(0), Fraction(2)) or i == length - 1
+            is_peak = bar == phrase_plan.peak_bar and pos == phrase_plan.peak_position
+            pitch = self._choose_pitch(
+                chord, next_chord, context, options, state,
+                is_strong=is_strong, is_ending=False, is_peak=is_peak,
+                bar=bar, section=section, phrase_plan=phrase_plan,
+            )
+            notes.append(MelodyNote(
+                pitch=pitch,
+                velocity=self._choose_velocity(rng, is_strong, is_peak, False, section),
+                bar=bar,
+                position=pos,
+                duration=cell,
+            ))
+            state.last_pitch = pitch
+            pos += cell
+
+        if not notes:
+            return [], min(cursor + cell, bar_end)
+        return notes, pos
+
+    def _make_sustained_note(
+        self,
+        bar: int,
+        position: Fraction,
+        duration: Fraction,
+        chord: ChordEvent,
+        next_chord: ChordEvent,
+        context: LoopContext,
+        options: GenerationOptions,
+        state: _GenState,
+        phrase_plan: PhrasePlan,
         section: PhraseSection,
-    ) -> list[Fraction]:
-        candidates = [p for p in POSITION_GRID if p < beats_per_bar]
-        rng.shuffle(candidates)
+        is_ending: bool = False,
+    ) -> MelodyNote:
+        rng = state.rng
+        pitch = self._choose_pitch(
+            chord, next_chord, context, options, state,
+            is_strong=True, is_ending=is_ending, is_peak=False,
+            bar=bar, section=section, phrase_plan=phrase_plan,
+        )
+        state.last_pitch = pitch
+        return MelodyNote(
+            pitch=pitch,
+            velocity=self._choose_velocity(rng, True, False, is_ending, section),
+            bar=bar,
+            position=position,
+            duration=quantize_duration(duration),
+        )
 
-        scored = []
-        for p in candidates:
-            accent = accent_map.get(p, 0.0)
-            offbeat_bonus = 0.3 if p % 1 != 0 else 0.0
-            if preset["rest_prob"] > 0.3:
-                offbeat_bonus *= 0.5
-            score = accent * 0.5 + offbeat_bonus + rng.random()
-            scored.append((score, p))
-
-        scored.sort(reverse=True)
-        positions = sorted([p for _, p in scored[:count]])
-
-        filtered: list[Fraction] = []
-        for p in positions:
-            if filtered and p - filtered[-1] < Fraction(1, 8):
-                continue
-            filtered.append(p)
-        return filtered[:count] if filtered else [Fraction(0), Fraction(2)]
+    def _scale_step(
+        self, pitch: int, direction: int, context: LoopContext, options: GenerationOptions
+    ) -> int:
+        pitches = sorted(self._pitches_for_pcs(context.scale_pitch_classes, options))
+        if not pitches:
+            return pitch + direction * 2
+        idx = min(range(len(pitches)), key=lambda i: abs(pitches[i] - pitch))
+        new_idx = max(0, min(len(pitches) - 1, idx + direction))
+        return pitches[new_idx]
 
     def _motif_to_notes(
         self, motif: Motif, bar: int, chord: ChordEvent,
@@ -326,17 +487,23 @@ class RuleBasedMelodyGenerator:
     ) -> list[MelodyNote]:
         rng = state.rng
         transposition = rng.choice([-2, -1, 0, 1, 2])
-        rhythm_shift = Fraction(rng.choice([0, 1, 2]), rng.choice([4, 8]))
         anchor = self._pick_chord_tone(chord, context, options, rng, register_center=True)
         pitch = anchor
-        position = rhythm_shift
+        position = Fraction(0)
+        fast_durs = [Fraction(1, 8), Fraction(1, 4), Fraction(1, 8)]
         notes: list[MelodyNote] = []
-        for i, (interval, dur) in enumerate(zip(motif.intervals, motif.durations)):
+        for i, interval in enumerate(motif.intervals):
+            dur = fast_durs[i % len(fast_durs)]
             if i == 0:
                 pitch = anchor
             else:
                 inv = -interval if rng.random() < 0.3 else interval
-                pitch = self._clamp_register(pitch + inv + (transposition if i == 1 else 0), options)
+                if context.key_enforced:
+                    pitch = self._scale_step(pitch, 1 if inv >= 0 else -1, context, options)
+                else:
+                    pitch = self._clamp_register(
+                        pitch + inv + (transposition if i == 1 else 0), options
+                    )
                 if context.key_enforced:
                     pitch = self._snap_to_scale(pitch, context, options)
             if position >= context.time_signature[0]:
