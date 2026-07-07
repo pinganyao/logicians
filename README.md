@@ -1,0 +1,130 @@
+# The Logicians
+
+AI-assisted melody improviser for Logic Pro. This prototype implements the full pipeline with a **rule-based melody generator** as a placeholder for a future MMM-inspired Transformer model.
+
+## Features
+
+- Parse MIDI loops (file or live capture)
+- Quantize notes to symbolic musical positions
+- Infer key, chord progression, bass roots, and rhythm density
+- Generate human-like melodies with detailed musical rules
+- Export melody as MIDI file or send live to Logic Pro
+- Deterministic output with fixed random seed
+
+## Installation
+
+```bash
+cd the-logicians
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+## Quick Start
+
+Generate an example input loop, then create a melody:
+
+```bash
+python scripts/create_example_loop.py
+python -m logicians.cli generate \
+  --input examples/input_loops/loop.mid \
+  --output examples/generated/melody.mid \
+  --seed 1
+```
+
+Analyze a loop:
+
+```bash
+python -m logicians.cli analyze --input examples/input_loops/loop.mid
+```
+
+List MIDI ports:
+
+```bash
+python -m logicians.cli ports
+```
+
+## Connecting Logic Pro (macOS)
+
+1. Open **Audio MIDI Setup** → **Window** → **Show MIDI Studio**
+2. Double-click **IAC Driver** and enable **Device is online**
+3. Create a bus (e.g. "IAC Driver Bus 1") if needed
+4. In Logic, set a software instrument track's MIDI input to the IAC bus for output from this tool
+5. Route Logic's loop output to the IAC bus for live capture
+
+### Live playback
+
+```bash
+python -m logicians.cli play \
+  --input examples/input_loops/loop.mid \
+  --midi-output "IAC Driver Bus 1" \
+  --tempo 120 \
+  --count-in 1
+```
+
+### Live capture
+
+The capture clock does **not** start when you run the command. Switch to Logic first, then press Play — capture begins on the first MIDI note (or when you press Enter with `--sync enter`). It records exactly `--bars` of musical time.
+
+```bash
+python -m logicians.cli live \
+  --midi-input "IAC Driver Bus 1" \
+  --midi-output "IAC Driver Bus 2" \
+  --tempo 120 \
+  --bars 4
+```
+
+Workflow:
+1. Run the command — it waits (no timer yet)
+2. Switch to Logic and press Play
+3. **Loop 1** — first MIDI note syncs to bar 1; loop is captured
+4. **Loop 2** — buffer while the melody is generated
+5. **Loop 3** — generated melody enters, synced to bar 1
+
+Use `--playback-loop 4` to delay entry further, or `--sync enter` to sync manually.
+
+## Architecture
+
+```
+MIDI File / Live Input → MidiInputAdapter → LoopCapture
+  → Quantizer → LoopAnalyzer → LoopContext
+  → MelodyGenerator (RuleBasedMelodyGenerator)
+  → MelodyClip → MidiScheduler / Export → Logic Pro
+```
+
+The `MelodyGenerator` protocol allows swapping the rule-based generator for a future neural model without changing the rest of the pipeline.
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `analyze` | Print tempo, key, chords, density |
+| `generate` | Create melody MIDI file |
+| `ports` | List MIDI I/O ports |
+| `play` | Generate and send melody live |
+| `live` | Capture loop and play generated melody |
+
+Use `--key` to match Logic's project key (e.g. `--key Am`, `--key D`). When set, the melody is strictly diatonic to that key — no chromatic passing tones.
+
+## Testing
+
+```bash
+pytest
+```
+
+## Project Structure
+
+```
+the-logicians/
+  src/logicians/
+    models.py      # Core dataclasses
+    quantize.py    # Symbolic quantization
+    midi_io.py     # MIDI parsing and ports
+    analysis.py    # Key/chord/density inference
+    generator.py   # Rule-based melody generator
+    export.py      # MIDI file export
+    scheduler.py   # Live playback scheduling
+    cli.py         # Command-line interface
+  tests/
+  examples/
+```

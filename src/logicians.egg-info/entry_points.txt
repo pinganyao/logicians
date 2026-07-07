@@ -1,0 +1,2 @@
+[console_scripts]
+logicians = logicians.cli:app
