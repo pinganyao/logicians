@@ -74,6 +74,8 @@ class GenerationOptions:
     phrase_length_bars: int | None = None
     start_on_loop_boundary: bool = True
     legato: bool = False
+    previous_clip: MelodyClip | None = None
+    iteration: int = 0
 
 
 class MelodyGenerator(Protocol):

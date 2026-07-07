@@ -16,5 +16,6 @@ src/logicians.egg-info/entry_points.txt
 src/logicians.egg-info/requires.txt
 src/logicians.egg-info/top_level.txt
 tests/test_analysis.py
+tests/test_capture.py
 tests/test_generator.py
 tests/test_quantize.py

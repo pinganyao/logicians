@@ -145,6 +145,41 @@ def group_notes_by_track(notes: list[NoteEvent]) -> dict[str, list[NoteEvent]]:
     return grouped
 
 
+BASS_PITCH_SPLIT = 52  # E3 — notes below are treated as bass in mixed/live capture
+
+
+def role_for_live_note(pitch: int, channel: int) -> str:
+    """Assign bass/chords/drums for live MIDI without track names."""
+    if channel == DRUM_CHANNEL:
+        return "drums"
+    if pitch < BASS_PITCH_SPLIT:
+        return "bass"
+    return "chords"
+
+
+def split_mixed_harmony_notes(notes: list[NoteEvent]) -> tuple[list[NoteEvent], list[NoteEvent]]:
+    """Split a single mixed stream into harmony and bass parts by register."""
+    chord_notes: list[NoteEvent] = []
+    bass_notes: list[NoteEvent] = []
+    for note in notes:
+        role = role_for_live_note(note.pitch, 0)
+        tagged = NoteEvent(
+            track=role,
+            pitch=note.pitch,
+            velocity=note.velocity,
+            start=note.start,
+            duration=note.duration,
+            bar=note.bar,
+            position=note.position,
+            duration_beats=note.duration_beats,
+        )
+        if role == "bass":
+            bass_notes.append(tagged)
+        else:
+            chord_notes.append(tagged)
+    return chord_notes, bass_notes
+
+
 def estimate_loop_bars(notes: list[NoteEvent], time_signature: tuple[int, int]) -> int:
     if not notes:
         return 4
@@ -212,7 +247,8 @@ class MidiInputAdapter:
 
         if msg.type == "note_on" and msg.velocity > 0:
             beat = self._elapsed_beats(tempo_bpm)
-            self._active[(msg.channel, msg.note)] = (beat, msg.velocity, self._track)
+            role = role_for_live_note(msg.note, msg.channel)
+            self._active[(msg.channel, msg.note)] = (beat, msg.velocity, role)
         elif msg.type in ("note_off", "note_on"):
             key = (msg.channel, msg.note)
             if key in self._active:

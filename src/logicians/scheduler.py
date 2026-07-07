@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import threading
 import time
+from collections.abc import Callable
 from enum import Enum
 from fractions import Fraction
 
@@ -140,3 +142,58 @@ class MidiScheduler:
             if remaining > 0:
                 time.sleep(remaining)
             start_time = time.time()
+
+    def play_improvisation(
+        self,
+        initial_clip: MelodyClip,
+        clip_factory: Callable[[int, MelodyClip], MelodyClip],
+        sync_time: float,
+        loop_duration_sec: float,
+        first_playback_loop: int,
+        seed: int | None = None,
+        on_loop_start: Callable[[int, MelodyClip], None] | None = None,
+    ) -> None:
+        """Play an initial clip then keep improvising new clips each loop until interrupted."""
+        iteration = 0
+        clip = initial_clip
+
+        try:
+            while True:
+                loop_start = sync_time + (first_playback_loop - 1 + iteration) * loop_duration_sec
+                self._wait_until(loop_start)
+
+                if on_loop_start:
+                    on_loop_start(iteration + first_playback_loop, clip)
+
+                next_clip_box: list[MelodyClip | None] = [None]
+
+                def _generate_next(idx: int, previous: MelodyClip) -> None:
+                    next_clip_box[0] = clip_factory(idx + 1, previous)
+
+                gen_thread = threading.Thread(
+                    target=_generate_next,
+                    args=(iteration, clip),
+                    daemon=True,
+                )
+                gen_thread.start()
+
+                play_seed = None if seed is None else seed + iteration
+                self.play(
+                    clip,
+                    start_mode=StartMode.IMMEDIATELY,
+                    seed=play_seed,
+                    start_at=loop_start,
+                )
+
+                gen_thread.join()
+                if next_clip_box[0] is None:
+                    break
+                clip = next_clip_box[0]
+                iteration += 1
+        except KeyboardInterrupt:
+            pass
+
+    def _wait_until(self, target_time: float) -> None:
+        now = time.time()
+        if now < target_time:
+            time.sleep(target_time - now)

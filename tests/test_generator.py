@@ -110,3 +110,79 @@ def test_midi_export_valid(tmp_path: Path):
     assert len(mid.tracks) >= 1
     note_ons = sum(1 for t in mid.tracks for m in t if m.type == "note_on" and m.velocity > 0)
     assert note_ons == len(clip.notes)
+
+
+def test_connected_loop_stays_within_reach_of_previous_ending():
+    context = _minimal_context(4)
+    gen = RuleBasedMelodyGenerator()
+    first = gen.generate(context, GenerationOptions(seed=7))
+    second = gen.generate(
+        context,
+        GenerationOptions(seed=7, previous_clip=first, iteration=1),
+    )
+    first_end = sorted(first.notes, key=lambda n: (n.bar, float(n.position)))[-1].pitch
+    second_start = sorted(second.notes, key=lambda n: (n.bar, float(n.position)))[0].pitch
+    assert abs(first_end - second_start) <= 5
+
+
+def test_connected_loop_remains_distinct_melody():
+    context = _minimal_context(4)
+    gen = RuleBasedMelodyGenerator()
+    first = gen.generate(context, GenerationOptions(seed=11))
+    second = gen.generate(
+        context,
+        GenerationOptions(seed=99, previous_clip=first, iteration=1),
+    )
+    first_pitches = [n.pitch for n in first.notes]
+    second_pitches = [n.pitch for n in second.notes]
+    assert first_pitches != second_pitches
+    matching = sum(1 for a, b in zip(first_pitches, second_pitches) if a == b)
+    assert matching / max(len(first_pitches), 1) < 0.5
+
+
+def test_resolution_ends_on_tonic_chord_tone():
+    context = _minimal_context(4)
+    gen = RuleBasedMelodyGenerator()
+    clip = gen.generate(context, GenerationOptions(seed=42))
+    bar4 = sorted(
+        [n for n in clip.notes if n.bar == 4],
+        key=lambda n: (float(n.position), -float(n.duration)),
+    )
+    assert bar4
+    last = bar4[-1]
+    assert last.pitch % 12 in {0, 4}
+
+
+def test_strong_beat_notes_favor_chord_tones():
+    context = _minimal_context(4)
+    gen = RuleBasedMelodyGenerator()
+    clip = gen.generate(context, GenerationOptions(seed=55))
+    strong = [
+        n for n in clip.notes
+        if float(n.position) % 1 in (0.0, 0.5)
+    ]
+    assert strong
+    chord_tone_ratio = sum(1 for n in strong if n.pitch % 12 in {0, 4, 7}) / len(strong)
+    assert chord_tone_ratio >= 0.55
+
+
+def test_avoid_fourth_rarely_on_strong_beats():
+    context = _minimal_context(4)
+    context.key_enforced = True
+    gen = RuleBasedMelodyGenerator()
+    clip = gen.generate(context, GenerationOptions(seed=88))
+    strong = [n for n in clip.notes if float(n.position) % 1 in (0.0, 0.5)]
+    fourth_on_strong = sum(1 for n in strong if n.pitch % 12 == 5)
+    assert fourth_on_strong / max(len(strong), 1) < 0.15
+
+
+def test_pop_melody_avoids_large_leaps():
+    context = _minimal_context(4)
+    gen = RuleBasedMelodyGenerator()
+    clip = gen.generate(context, GenerationOptions(seed=42))
+    ordered = sorted(clip.notes, key=lambda n: (n.bar, float(n.position)))
+    leaps = [abs(ordered[i].pitch - ordered[i - 1].pitch) for i in range(1, len(ordered))]
+    assert leaps
+    assert max(leaps) <= 5
+    step_ratio = sum(1 for leap in leaps if leap <= 2) / len(leaps)
+    assert step_ratio >= 0.65
