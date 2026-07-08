@@ -5,14 +5,16 @@ melody. It is intentionally self-contained (its own data models, options, and
 generator) so it can be developed and tested without touching the melody
 generation or scheduling code.
 
-Design (conservative variation):
-- Keep the original kick/backbeat-snare skeleton so it still reads as the same
-  groove. If the loop has no usable drums, synthesize a basic backbeat.
-- Rebuild the hi-hat layer, accenting hats that coincide with strong melody
-  onsets.
-- Add ghost snares in the melody's rests ("answer in the gaps").
-- Drop a short tom fill on the last beat of the loop (phrase boundary).
-- Hit a crash + kick on the melody's peak.
+A single `variation` knob in [0, 1] controls how far the result departs from
+the captured drums:
+- 0.0 -> the input drum loop verbatim (nothing added, nothing changed).
+- As it rises, the original hits are progressively eroded (dropped),
+  displaced in time, and re-voiced, while reactive layers fade in: hi-hats
+  accenting strong melody onsets, ghost snares answering the melody's rests,
+  a tom fill at the phrase boundary, and a crash on the melody's peak.
+- 1.0 -> a heavily reworked beat that only loosely echoes the original.
+
+If the loop has no usable drums, a basic backbeat is synthesized as the base.
 
 The generator is a pure function of (original drum track, melody clip, options)
 and is deterministic for a fixed seed.
@@ -43,6 +45,11 @@ INPUT_SNARES = {37, 38, 40}
 # Drum hits are one-shots; duration is nominal (matters only for note-off).
 HIT_DURATION = Fraction(1, 8)
 
+# `variation` thresholds at which the ornamental layers switch on.
+PEAK_ACCENT_THRESHOLD = 0.35  # crash + kick on the melody peak
+FILL_THRESHOLD = 0.5          # tom fill at the phrase boundary
+SIXTEENTH_HAT_THRESHOLD = 0.6  # hats move from 8th- to 16th-note grid
+
 
 @dataclass
 class DrumHit:
@@ -65,8 +72,8 @@ class DrumClip:
 @dataclass
 class DrumOptions:
     seed: int | None = None
-    # 0.0 = closest to the original groove, 1.0 = busiest reaction. Conservative
-    # by default: keeps the skeleton, adds a modest reactive layer.
+    # 0.0 = the input groove untouched, 1.0 = a completely reworked beat.
+    # Conservative by default: mostly the original groove with light ornaments.
     variation: float = 0.3
     channel: int = 9  # GM channel 10 (0-indexed)
 
@@ -84,38 +91,69 @@ class RuleBasedDrumGenerator:
         rng = random.Random(options.seed)
         beats_per_bar = context.time_signature[0]
         bars = context.bars
+        variation = max(0.0, min(1.0, options.variation))
 
-        skeleton = self._extract_skeleton(
-            context.tracks.get("drums", []), bars, beats_per_bar
-        )
         onsets_by_bar, intervals_by_bar = self._melody_maps(melody)
         peak = self._melody_peak(melody)
 
-        hits: list[DrumHit] = list(skeleton)
-        hits += self._hat_layer(bars, beats_per_bar, onsets_by_bar, options, rng)
-        hits += self._ghost_layer(bars, beats_per_bar, intervals_by_bar, options, rng)
-        hits = self._apply_fill(hits, bars, beats_per_bar, rng)
-        if peak is not None:
+        # Start from the captured groove, then move away from it by `variation`.
+        base = self._base_hits(context.tracks.get("drums", []), bars, beats_per_bar)
+        hits: list[DrumHit] = self._mutate_base(base, variation, rng)
+        hits += self._hat_layer(bars, beats_per_bar, onsets_by_bar, variation, rng)
+        hits += self._ghost_layer(bars, beats_per_bar, intervals_by_bar, variation, rng)
+        if variation >= FILL_THRESHOLD:
+            hits = self._apply_fill(hits, bars, beats_per_bar, rng)
+        if peak is not None and variation >= PEAK_ACCENT_THRESHOLD:
             hits += self._peak_accent(peak)
 
         return DrumClip(bars=bars, hits=self._validate(hits, bars, beats_per_bar))
 
-    # -- skeleton -------------------------------------------------------------
+    # -- base groove ----------------------------------------------------------
 
-    def _extract_skeleton(
+    def _base_hits(
         self, original: list, bars: int, beats_per_bar: int
     ) -> list[DrumHit]:
-        """Keep the original kick + snare hits (the groove backbone). Fall back
-        to a synthesized backbeat when the loop has no usable drums."""
-        kept: list[DrumHit] = []
-        for note in original:
-            if note.pitch in INPUT_KICKS:
-                kept.append(DrumHit(KICK, note.velocity, note.bar, note.position))
-            elif note.pitch in INPUT_SNARES:
-                kept.append(DrumHit(SNARE, note.velocity, note.bar, note.position))
-        if kept:
-            return kept
+        """The captured drum loop as hits, verbatim (all voices preserved). Fall
+        back to a synthesized backbeat when the loop has no usable drums."""
+        hits = [DrumHit(n.pitch, n.velocity, n.bar, n.position) for n in original]
+        if hits:
+            return hits
         return self._synth_skeleton(bars, beats_per_bar)
+
+    def _mutate_base(
+        self, base: list[DrumHit], variation: float, rng: random.Random
+    ) -> list[DrumHit]:
+        """Move the original groove away from itself in proportion to `variation`
+        by dropping, time-shifting, and re-voicing hits. At variation 0 the base
+        is returned untouched (a verbatim copy)."""
+        if variation <= 0:
+            return list(base)
+
+        drop_prob = 0.5 * variation
+        shift_prob = 0.4 * variation
+        swap_prob = 0.3 * variation
+        step = Fraction(1, 4) if variation > 0.5 else Fraction(1, 2)
+
+        out: list[DrumHit] = []
+        for hit in base:
+            if rng.random() < drop_prob:
+                continue
+            position = hit.position
+            pitch = hit.pitch
+            if rng.random() < shift_prob:
+                position = hit.position + rng.choice((-step, step))
+            if rng.random() < swap_prob:
+                pitch = self._swap_voice(pitch, rng)
+            out.append(DrumHit(pitch, hit.velocity, hit.bar, position))
+        return out
+
+    def _swap_voice(self, pitch: int, rng: random.Random) -> int:
+        """Re-voice a hit to a related drum so the pattern reads differently."""
+        if pitch in INPUT_KICKS or pitch == KICK:
+            return SNARE
+        if pitch in INPUT_SNARES or pitch == SNARE:
+            return rng.choice([KICK, *FILL_TOMS])
+        return rng.choice([KICK, SNARE])
 
     def _synth_skeleton(self, bars: int, beats_per_bar: int) -> list[DrumHit]:
         """Basic backbeat: kick on downbeats/mid-bar, snare on the backbeats."""
@@ -185,16 +223,22 @@ class RuleBasedDrumGenerator:
         bars: int,
         beats_per_bar: int,
         onsets_by_bar: dict[int, list[tuple[Fraction, int]]],
-        options: DrumOptions,
+        variation: float,
         rng: random.Random,
     ) -> list[DrumHit]:
-        """Steady hats, accented (louder + occasionally opened) where the melody
-        lands a strong onset. Sixteenth grid only at high variation."""
-        subdivision = 4 if options.variation > 0.6 else 2
+        """An *added* hat layer whose density grows with variation (none at 0),
+        accented (louder + occasionally opened) where the melody lands a strong
+        onset. Sixteenth grid only at high variation."""
+        if variation <= 0:
+            return []
+        density = 0.9 * variation
+        subdivision = 4 if variation > SIXTEENTH_HAT_THRESHOLD else 2
         grid = [Fraction(i, subdivision) for i in range(subdivision * beats_per_bar)]
         hits: list[DrumHit] = []
         for bar in range(1, bars + 1):
             for pos in grid:
+                if rng.random() >= density:
+                    continue
                 if self._has_accent(bar, pos, onsets_by_bar, threshold=90):
                     pitch = OPEN_HAT if rng.random() < 0.3 else CLOSED_HAT
                     velocity = rng.randint(80, 100)
@@ -209,12 +253,14 @@ class RuleBasedDrumGenerator:
         bars: int,
         beats_per_bar: int,
         intervals_by_bar: dict[int, list[tuple[Fraction, Fraction]]],
-        options: DrumOptions,
+        variation: float,
         rng: random.Random,
     ) -> list[DrumHit]:
         """Ghost snares on offbeats where the melody is silent -- the drummer
-        answering in the gaps. Density scales with variation."""
-        prob = 0.15 + 0.4 * options.variation
+        answering in the gaps. Density scales with variation (none at 0)."""
+        if variation <= 0:
+            return []
+        prob = 0.5 * variation
         offbeats = [Fraction(2 * i + 1, 2) for i in range(beats_per_bar)]
         hits: list[DrumHit] = []
         for bar in range(1, bars + 1):

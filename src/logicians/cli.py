@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Optional
 
 import typer
 
 from .analysis import build_loop_context, parse_key
+from .drums import DrumOptions, RuleBasedDrumGenerator
 from .export import export_melody_from_context
 from .generator import RuleBasedMelodyGenerator
 from .midi_io import (
@@ -19,7 +21,7 @@ from .midi_io import (
     parse_midi_file,
 )
 from .models import GenerationOptions, MelodyClip, LoopContext
-from .scheduler import MidiScheduler, StartMode
+from .scheduler import DrumScheduler, MidiScheduler, StartMode
 
 app = typer.Typer(name="logicians", help="AI-assisted melody improviser for Logic Pro")
 
@@ -153,8 +155,25 @@ def play(
 
 @app.command()
 def live(
-    midi_input: str = typer.Option(..., "--midi-input", help="MIDI input port name"),
-    midi_output: str = typer.Option(..., "--midi-output", help="MIDI output port name"),
+    midi_input: str = typer.Option("IAC Driver Bus 1", "--midi-input", help="MIDI input port name"),
+    midi_output: str = typer.Option("IAC Driver Bus 2", "--midi-output", help="MIDI output port name for the melody"),
+    drum_output: Optional[str] = typer.Option(
+        "IAC Driver Bus 2",
+        "--drum-output",
+        help="MIDI output port for the reactive drum variation. "
+        "Pass an empty string (--drum-output '') to disable drum generation.",
+    ),
+    drum_channel: int = typer.Option(
+        1,
+        "--drum-channel",
+        help="MIDI channel for drum output, 0-indexed (default 1 = channel 2 in Logic)",
+    ),
+    drum_variation: float = typer.Option(
+        0.3,
+        "--drum-variation",
+        help="How far the drums depart from the captured groove: "
+        "0.0 = identical to the input, 1.0 = a completely reworked beat",
+    ),
     tempo: float = typer.Option(120.0, "--tempo"),
     bars: int = typer.Option(4, "--bars"),
     time_signature: str = typer.Option("4/4", "--time-signature"),
@@ -185,9 +204,12 @@ def live(
 
     midi_in = MidiInputAdapter(midi_input)
     midi_out = MidiOutputAdapter(midi_output)
+    drum_out = MidiOutputAdapter(drum_output, channel=drum_channel) if drum_output else None
 
     midi_in.open()
     midi_out.open()
+    if drum_out:
+        drum_out.open()
     try:
         if sync == "first-note":
             typer.echo(
@@ -219,6 +241,34 @@ def live(
 
         scheduler = MidiScheduler(midi_out, context)
 
+        drum_generator = RuleBasedDrumGenerator() if drum_out else None
+        drum_scheduler = DrumScheduler(drum_out, context) if drum_out else None
+
+        def start_drums(melody: MelodyClip, start_at: float, iteration: int) -> tuple[threading.Thread | None, int]:
+            """Generate a drum variation reacting to `melody` and play it (in a
+            background thread) aligned to the same loop start. Returns the
+            thread and the hit count, or (None, 0) if drums are disabled."""
+            if not drum_scheduler:
+                return None, 0
+            opts = DrumOptions(
+                seed=None if seed is None else seed + iteration,
+                variation=drum_variation,
+            )
+            drum_clip = drum_generator.generate(context, melody, opts)
+            thread = threading.Thread(
+                target=drum_scheduler.play_clip,
+                args=(drum_clip, start_at),
+                daemon=True,
+            )
+            thread.start()
+            return thread, len(drum_clip.hits)
+
+        if drum_out:
+            typer.echo(
+                f"Reactive drums -> '{drum_output}' (channel {drum_channel + 1}), "
+                f"variation {drum_variation:.2f}."
+            )
+
         if continuous:
             typer.echo(
                 f"Improvising from loop {playback_loop} — each cycle connects smoothly to the last. "
@@ -235,7 +285,12 @@ def live(
                 return generator.generate(context, opts)
 
             def on_loop(loop_num: int, playing: MelodyClip) -> None:
-                typer.echo(f"Loop {loop_num}: playing {len(playing.notes)} notes")
+                message = f"Loop {loop_num}: playing {len(playing.notes)} notes"
+                if drum_scheduler:
+                    loop_start = sync_time + (loop_num - 1) * duration_sec
+                    _, hit_count = start_drums(playing, loop_start, loop_num)
+                    message += f" + {hit_count} drum hits"
+                typer.echo(message)
 
             scheduler.play_improvisation(
                 initial_clip=clip,
@@ -254,14 +309,23 @@ def live(
                 f"Playing generated melody ({len(clip.notes)} notes) "
                 f"aligned to loop {playback_loop}..."
             )
+            drum_thread, hit_count = start_drums(clip, playback_start, playback_loop)
+            if drum_thread:
+                typer.echo(f"Playing {hit_count} drum hits alongside the melody...")
             scheduler.play(
                 clip,
                 start_mode=StartMode.IMMEDIATELY,
                 seed=seed,
                 start_at=playback_start,
             )
+            if drum_thread:
+                drum_thread.join()
     finally:
         midi_in.close()
+        if drum_out:
+            drum_out.panic()
+            drum_out.close()
+        midi_out.panic()
         midi_out.close()
 
 

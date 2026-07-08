@@ -147,14 +147,32 @@ def group_notes_by_track(notes: list[NoteEvent]) -> dict[str, list[NoteEvent]]:
 
 BASS_PITCH_SPLIT = 52  # E3 — notes below are treated as bass in mixed/live capture
 
+# Explicit channel -> role mapping for live capture. mido channels are 0-indexed,
+# so these correspond to the 1-indexed numbers shown in a DAW like Logic:
+#   channel 1 (Logic) -> 0, channel 2 (Logic) -> 1
+LIVE_CHANNEL_ROLES = {
+    0: "chords",  # Logic channel 1
+    1: "drums",   # Logic channel 2
+}
+
+
+def role_by_register(pitch: int) -> str:
+    """Bass vs chords purely by pitch register (no channel information)."""
+    return "bass" if pitch < BASS_PITCH_SPLIT else "chords"
+
 
 def role_for_live_note(pitch: int, channel: int) -> str:
-    """Assign bass/chords/drums for live MIDI without track names."""
+    """Assign a role for live MIDI, preferring the explicit channel mapping.
+
+    Channels listed in LIVE_CHANNEL_ROLES are routed directly; anything else
+    falls back to the GM drum channel and pitch-register heuristics.
+    """
+    role = LIVE_CHANNEL_ROLES.get(channel)
+    if role is not None:
+        return role
     if channel == DRUM_CHANNEL:
         return "drums"
-    if pitch < BASS_PITCH_SPLIT:
-        return "bass"
-    return "chords"
+    return role_by_register(pitch)
 
 
 def split_mixed_harmony_notes(notes: list[NoteEvent]) -> tuple[list[NoteEvent], list[NoteEvent]]:
@@ -162,7 +180,7 @@ def split_mixed_harmony_notes(notes: list[NoteEvent]) -> tuple[list[NoteEvent], 
     chord_notes: list[NoteEvent] = []
     bass_notes: list[NoteEvent] = []
     for note in notes:
-        role = role_for_live_note(note.pitch, 0)
+        role = role_by_register(note.pitch)
         tagged = NoteEvent(
             track=role,
             pitch=note.pitch,
@@ -366,4 +384,11 @@ class MidiOutputAdapter:
 
     def send_note_off(self, pitch: int) -> None:
         if self._port:
+            self._port.send(mido.Message("note_off", note=pitch, velocity=0, channel=self.channel))
+
+    def panic(self) -> None:
+        """Send note_off for every pitch on this channel to kill hung notes."""
+        if not self._port:
+            return
+        for pitch in range(128):
             self._port.send(mido.Message("note_off", note=pitch, velocity=0, channel=self.channel))
