@@ -42,6 +42,11 @@ FILL_TOMS = [50, 47, 45, 43]
 INPUT_KICKS = {35, 36}
 INPUT_SNARES = {37, 38, 40}
 
+# All pitches that count as a kick / snare (input variants plus our output pitch),
+# shared with bass.py so the "is this a kick/snare" test lives in one place.
+KICK_PITCHES = INPUT_KICKS | {KICK}
+SNARE_PITCHES = INPUT_SNARES | {SNARE}
+
 # Drum hits are one-shots; duration is nominal (matters only for note-off).
 HIT_DURATION = Fraction(1, 8)
 
@@ -149,9 +154,9 @@ class RuleBasedDrumGenerator:
 
     def _swap_voice(self, pitch: int, rng: random.Random) -> int:
         """Re-voice a hit to a related drum so the pattern reads differently."""
-        if pitch in INPUT_KICKS or pitch == KICK:
+        if pitch in KICK_PITCHES:
             return SNARE
-        if pitch in INPUT_SNARES or pitch == SNARE:
+        if pitch in SNARE_PITCHES:
             return rng.choice([KICK, *FILL_TOMS])
         return rng.choice([KICK, SNARE])
 

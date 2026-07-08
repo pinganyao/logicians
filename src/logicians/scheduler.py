@@ -6,12 +6,9 @@ import threading
 import time
 from collections.abc import Callable
 from enum import Enum
-from fractions import Fraction
 
 from .midi_io import MidiOutputAdapter
 from .models import LoopContext, MelodyClip, MelodyNote
-from .drums import DrumClip
-from .bass import BassClip
 from .export import melody_note_to_beats
 
 
@@ -22,9 +19,9 @@ def _play_timed_notes(output, events_source, start_at: float, beat_sec: float, b
     sent first."""
     events: list[tuple[float, int, int, int]] = []  # (time, order, pitch, velocity); order 0=off, 1=on
     for note in events_source:
-        beats = (note.bar - 1) * beats_per_bar + float(note.position)
-        on_time = start_at + beats * beat_sec
-        off_time = on_time + float(note.duration) * beat_sec
+        start_beats, dur_beats = melody_note_to_beats(note, beats_per_bar)
+        on_time = start_at + start_beats * beat_sec
+        off_time = on_time + dur_beats * beat_sec
         events.append((on_time, 1, note.pitch, note.velocity))
         events.append((off_time, 0, note.pitch, 0))
 
@@ -230,41 +227,22 @@ class MidiScheduler:
             time.sleep(target_time - now)
 
 
-class DrumScheduler:
-    """Schedule and play a DrumClip over MIDI output.
-
-    Unlike MidiScheduler (monophonic, sequential), drum hits are polyphonic
-    one-shots, so this builds an absolute-time event list and dispatches it,
-    letting several hits sound at the same instant.
+class ClipScheduler:
+    """Schedule and play a set of timed notes (drum hits or bass notes) over MIDI
+    output, using polyphony-safe absolute-time dispatch. Distinct from
+    MidiScheduler, which does humanized, sequential, monophonic melody playback.
     """
 
     def __init__(self, output: MidiOutputAdapter, context: LoopContext):
         self.output = output
         self.context = context
 
-    def play_clip(self, clip: DrumClip, start_at: float) -> None:
-        """Play all hits, timed relative to the absolute wall-clock `start_at`."""
+    def play(self, notes, start_at: float) -> None:
+        """Play `notes` (any iterable of objects with pitch/velocity/bar/position/
+        duration), timed relative to the absolute wall-clock `start_at`."""
         _play_timed_notes(
             self.output,
-            clip.hits,
-            start_at,
-            60.0 / self.context.tempo_bpm,
-            self.context.time_signature[0],
-        )
-
-
-class BassScheduler:
-    """Schedule and play a BassClip over MIDI output. The line is monophonic,
-    but the same absolute-time dispatch is used as for drums."""
-
-    def __init__(self, output: MidiOutputAdapter, context: LoopContext):
-        self.output = output
-        self.context = context
-
-    def play_clip(self, clip: BassClip, start_at: float) -> None:
-        _play_timed_notes(
-            self.output,
-            clip.notes,
+            notes,
             start_at,
             60.0 / self.context.tempo_bpm,
             self.context.time_signature[0],
