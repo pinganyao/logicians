@@ -11,7 +11,37 @@ from fractions import Fraction
 from .midi_io import MidiOutputAdapter
 from .models import LoopContext, MelodyClip, MelodyNote
 from .drums import DrumClip
+from .bass import BassClip
 from .export import melody_note_to_beats
+
+
+def _play_timed_notes(output, events_source, start_at: float, beat_sec: float, beats_per_bar: int) -> None:
+    """Dispatch note events (each with pitch/velocity/bar/position/duration) at
+    absolute wall-clock times relative to `start_at`. Polyphony-safe: several
+    notes may sound at once, and a note_off sharing an instant with a note_on is
+    sent first."""
+    events: list[tuple[float, int, int, int]] = []  # (time, order, pitch, velocity); order 0=off, 1=on
+    for note in events_source:
+        beats = (note.bar - 1) * beats_per_bar + float(note.position)
+        on_time = start_at + beats * beat_sec
+        off_time = on_time + float(note.duration) * beat_sec
+        events.append((on_time, 1, note.pitch, note.velocity))
+        events.append((off_time, 0, note.pitch, 0))
+
+    events.sort(key=lambda e: (e[0], e[1]))
+
+    now = time.time()
+    if now < start_at:
+        time.sleep(start_at - now)
+
+    for event_time, order, pitch, velocity in events:
+        now = time.time()
+        if event_time > now:
+            time.sleep(event_time - now)
+        if order == 1:
+            output.send_note_on(pitch, velocity)
+        else:
+            output.send_note_off(pitch)
 
 
 class StartMode(str, Enum):
@@ -212,35 +242,30 @@ class DrumScheduler:
         self.output = output
         self.context = context
 
-    def _beat_duration_sec(self) -> float:
-        return 60.0 / self.context.tempo_bpm
-
     def play_clip(self, clip: DrumClip, start_at: float) -> None:
         """Play all hits, timed relative to the absolute wall-clock `start_at`."""
-        beats_per_bar = self.context.time_signature[0]
-        beat_sec = self._beat_duration_sec()
+        _play_timed_notes(
+            self.output,
+            clip.hits,
+            start_at,
+            60.0 / self.context.tempo_bpm,
+            self.context.time_signature[0],
+        )
 
-        # (time, order, pitch, velocity); order 0 = note_off, 1 = note_on so that
-        # a note_off sharing an instant with a note_on is sent first.
-        events: list[tuple[float, int, int, int]] = []
-        for hit in clip.hits:
-            beats = (hit.bar - 1) * beats_per_bar + float(hit.position)
-            on_time = start_at + beats * beat_sec
-            off_time = on_time + float(hit.duration) * beat_sec
-            events.append((on_time, 1, hit.pitch, hit.velocity))
-            events.append((off_time, 0, hit.pitch, 0))
 
-        events.sort(key=lambda e: (e[0], e[1]))
+class BassScheduler:
+    """Schedule and play a BassClip over MIDI output. The line is monophonic,
+    but the same absolute-time dispatch is used as for drums."""
 
-        now = time.time()
-        if now < start_at:
-            time.sleep(start_at - now)
+    def __init__(self, output: MidiOutputAdapter, context: LoopContext):
+        self.output = output
+        self.context = context
 
-        for event_time, order, pitch, velocity in events:
-            now = time.time()
-            if event_time > now:
-                time.sleep(event_time - now)
-            if order == 1:
-                self.output.send_note_on(pitch, velocity)
-            else:
-                self.output.send_note_off(pitch)
+    def play_clip(self, clip: BassClip, start_at: float) -> None:
+        _play_timed_notes(
+            self.output,
+            clip.notes,
+            start_at,
+            60.0 / self.context.tempo_bpm,
+            self.context.time_signature[0],
+        )
