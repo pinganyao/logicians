@@ -23,6 +23,7 @@ from fractions import Fraction
 
 from .drums import DrumClip
 from .models import ChordEvent, LoopContext, MelodyClip
+from .cellular_automaton import CellularAutomatonBassGenerator
 
 # --- Tunables ---------------------------------------------------------------
 
@@ -180,73 +181,126 @@ def approach_tone(
 
 
 class BassGenerator:
-    """Root–fifth bassline: root on beat 1, fifth on beat 3, per chord.
 
-    ``generate(context, melody, drums, options)`` returns a ``BassClip``. The
-    ``melody`` and ``drums`` arguments are accepted for pipeline compatibility
-    (and as future seams) but are unused by this version.
-    """
-
-    _low: int = BASS_LOW
-    _high: int = BASS_HIGH
+    _low = BASS_LOW
+    _high = BASS_HIGH
 
     def generate(
         self,
-        context: LoopContext,
-        melody: MelodyClip | None = None,
-        drums: DrumClip | None = None,
-        options: BassOptions | None = None,
-    ) -> BassClip:
-        options = options or BassOptions()  # noqa: F841 -- reserved seam (seed/variation)
+        context,
+        melody=None,
+        drums=None,
+        options=None,
+    ):
+
+        options = options or BassOptions()
 
         beats_per_bar = context.time_signature[0]
-        pattern = bass_pattern(beats_per_bar)  # RHYTHM + SHAPE
-        loop_beats = context.bars * beats_per_bar
+        pattern = bass_pattern(beats_per_bar)
 
-        # Every slot across the loop, in time order.
         slots = [
-            (bar, position, degree)
+            (bar, pos)
             for bar in range(1, context.bars + 1)
-            for position, degree in pattern
+            for pos, _ in pattern
         ]
-        slots.sort(key=lambda s: (s[0], float(s[1])))
 
-        notes: list[BassNote] = []
+        ca = CellularAutomatonBassGenerator(
+            len(slots),
+            seed=options.seed,
+        )
+
+        notes = []
         prev_pitch = self._mid()
-        for index, (bar, position, degree) in enumerate(slots):
+
+        for i, (bar, position) in enumerate(slots):
+
             chord = chord_at(context, bar, position)
-            pitch_class = degree_pitch_class(degree, chord, context)  # PITCH
-            pitch = clamp_to_register(  # REGISTER
-                nearest_in_register(pitch_class, prev_pitch, self._low, self._high),
+
+            root_pc = degree_pitch_class(ROOT, chord, context)
+            fifth_pc = degree_pitch_class(FIFTH, chord, context)
+
+            state = int(ca.state[i])
+
+            velocity = 90
+            duration = Fraction(2)
+
+            if state == 0:
+                pitch_pc = root_pc
+
+            elif state == 1:
+                pitch_pc = root_pc
+                velocity = 115
+
+            elif state == 2:
+                pitch_pc = root_pc
+
+            elif state == 3:
+                pitch = approach_tone(
+                    root_pc,
+                    set(range(12)),
+                    prev_pitch,
+                    self._low,
+                    self._high,
+                )
+                notes.append(
+                    BassNote(
+                        pitch=pitch,
+                        velocity=90,
+                        bar=bar,
+                        position=position,
+                        duration=Fraction(1),
+                    )
+                )
+                prev_pitch = pitch
+                continue
+
+            elif state == 4:
+                pitch_pc = fifth_pc
+
+            elif state == 5:
+                pitch_pc = (root_pc - 1) % 12
+
+            elif state == 6:
+                pitch_pc = random.choice(
+                    [
+                        root_pc,
+                        fifth_pc,
+                        (root_pc + 9) % 12,
+                    ]
+                )
+
+            elif state == 7:
+                pitch_pc = root_pc
+                duration = Fraction(1)
+
+            pitch = nearest_in_register(
+                pitch_pc,
+                prev_pitch,
                 self._low,
                 self._high,
             )
-            duration = self._duration(index, slots, beats_per_bar, loop_beats)
-            velocity = VELOCITY.get(degree, DEFAULT_VELOCITY)
-            notes.append(BassNote(pitch, velocity, bar, position, duration))
+
+            if state == 2:
+                if pitch + 12 <= self._high:
+                    pitch += 12
+                elif pitch - 12 >= self._low:
+                    pitch -= 12
+
+            notes.append(
+                BassNote(
+                    pitch=pitch,
+                    velocity=velocity,
+                    bar=bar,
+                    position=position,
+                    duration=duration,
+                )
+            )
+
             prev_pitch = pitch
-        return BassClip(bars=context.bars, notes=notes)
 
-    # -- helpers --------------------------------------------------------------
+        ca.step()
 
-    def _mid(self) -> int:
-        return (self._low + self._high) // 2
-
-    def _duration(
-        self,
-        index: int,
-        slots: list[tuple[int, Fraction, str]],
-        beats_per_bar: int,
-        loop_beats: int,
-    ) -> Fraction:
-        """Extend to just before the next onset (or the loop end for the last
-        note), detached by ``DETACH`` and never overlapping the next onset."""
-        bar, position = slots[index][0], slots[index][1]
-        this_beat = (bar - 1) * beats_per_bar + position
-        if index + 1 < len(slots):
-            next_bar, next_pos = slots[index + 1][0], slots[index + 1][1]
-            next_beat = (next_bar - 1) * beats_per_bar + next_pos
-        else:
-            next_beat = loop_beats
-        gap = next_beat - this_beat
-        return min(gap, max(MIN_DURATION, gap - DETACH))
+        return BassClip(
+            bars=context.bars,
+            notes=notes,
+        )
