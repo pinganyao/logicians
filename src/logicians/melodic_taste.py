@@ -33,6 +33,70 @@ _LANDING_STABILITY: dict[int, float] = {
     7: 0.2,   # ti — strong tendency tone
 }
 
+_PENTATONIC_DEGREES = frozenset({1, 2, 3, 5, 6})
+
+
+def is_subdominant_chord(chord: ChordEvent, loop: LoopContext) -> bool:
+    """True when the sounding chord is the IV (subdominant) of the key."""
+    rel = (chord.root - loop.key_root) % 12
+    if loop.key_mode == "major":
+        return rel == 5
+    return rel == 5 or rel == 3  # iv or IV in minor
+
+
+def is_submediant_chord(chord: ChordEvent, loop: LoopContext) -> bool:
+    """True when the sounding chord is vi (major) or bVI (minor)."""
+    rel = (chord.root - loop.key_root) % 12
+    if loop.key_mode == "major":
+        return rel == 9
+    return rel == 8
+
+
+def is_predominant_fourth_chord(chord: ChordEvent, loop: LoopContext) -> bool:
+    """IV or vi — the only harmonies where scale degree 4 may appear."""
+    return is_subdominant_chord(chord, loop) or is_submediant_chord(chord, loop)
+
+
+def is_main_beat(beat_position: Fraction) -> bool:
+    """Downbeat of the bar (beat 1), not the half-beat."""
+    return beat_position % 1 == Fraction(0)
+
+
+def fourth_degree_allowed(pc: int, taste: TasteContext) -> bool:
+    """Scale degree 4 only on downbeats over IV or vi."""
+    fourth_pc = scale_degree_pc(taste.loop, 4)
+    if pc != fourth_pc:
+        return True
+    return (
+        is_predominant_fourth_chord(taste.chord, taste.loop)
+        and is_main_beat(taste.beat_position)
+    )
+
+
+def seventh_degree_allowed(pc: int, taste: TasteContext) -> bool:
+    """Leading tone only as the final note when the loop ends on V."""
+    leading_pc = scale_degree_pc(taste.loop, 7)
+    if pc != leading_pc:
+        return True
+    return (
+        taste.is_loop_ending
+        and chord_harmonic_function(taste.chord, taste.loop) == "dominant"
+    )
+
+
+def is_pentatonic_pc(loop: LoopContext, pc: int) -> bool:
+    degree = scale_degree_of_pc(loop, pc)
+    return degree is not None and degree in _PENTATONIC_DEGREES
+
+
+def pentatonic_bonus(pc: int, taste: TasteContext) -> float:
+    if not is_pentatonic_pc(taste.loop, pc):
+        return 0.0
+    bonus = 0.14
+    if taste.pitch_role in ("weak", "anticipation"):
+        bonus += 0.06
+    return bonus
+
 
 @dataclass(frozen=True)
 class TasteContext:
@@ -41,6 +105,7 @@ class TasteContext:
     loop: LoopContext
     pitch_role: PitchRole
     is_ending: bool
+    is_loop_ending: bool
     last_pitch: int | None
     beat_position: Fraction
     bar_cadence: CadenceType
@@ -112,7 +177,16 @@ def avoid_penalty(pc: int, taste: TasteContext) -> float:
     function = chord_harmonic_function(chord, loop)
     is_strong = taste.pitch_role in ("strong", "cadence") or taste.is_ending
 
-    # Berklee avoid note: 4th scale degree over major chord (m9 above the 3rd).
+  # Scale degree 4: only on downbeats over IV or vi.
+    fourth_pc = scale_degree_pc(loop, 4)
+    if degree == 4 and pc == fourth_pc and not fourth_degree_allowed(pc, taste):
+        penalty = max(penalty, 0.95)
+
+    leading = scale_degree_pc(loop, 7)
+    if degree == 7 and pc == leading and not seventh_degree_allowed(pc, taste):
+        penalty = max(penalty, 0.95)
+
+    # Berklee avoid note: 4th over major chord (m9 above the 3rd).
     fourth = scale_degree_pc(loop, 4)
     third = _chord_third_pc(chord)
     is_major_family = chord.quality in ("major", "maj7", "dom7")
@@ -125,7 +199,6 @@ def avoid_penalty(pc: int, taste: TasteContext) -> float:
         penalty = max(penalty, 0.75 if is_strong else 0.35)
 
     # Leading tone on tonic harmony — functional dissonance if sustained.
-    leading = scale_degree_pc(loop, 7)
     if pc == leading and function == "tonic" and pc not in chord_pcs:
         penalty = max(penalty, 0.85 if is_strong else 0.3)
 
@@ -150,6 +223,15 @@ def avoid_penalty(pc: int, taste: TasteContext) -> float:
     # 2nd degree sustained on strong beat — floaty.
     if degree == 2 and is_strong and pc not in chord_pcs:
         penalty = max(penalty, 0.5)
+
+    # Phrase endings: consonant chord tones; 7th only on loop-ending dominant.
+    if taste.is_ending or taste.pitch_role == "cadence":
+        if pc not in chord_pcs:
+            penalty = max(penalty, 0.95)
+        elif degree == 4 and not fourth_degree_allowed(pc, taste):
+            penalty = max(penalty, 0.95)
+        elif degree == 7 and not seventh_degree_allowed(pc, taste):
+            penalty = max(penalty, 0.95)
 
     return min(1.0, penalty)
 
@@ -226,6 +308,8 @@ def chord_tone_weight(pc: int, taste: TasteContext) -> float:
 
     if pc == chord.root:
         weight = 1.1 if function == "tonic" else 0.85
+        if is_subdominant_chord(chord, taste.loop) and taste.pitch_role in ("strong", "cadence"):
+            weight += 0.45
     elif pc == third:
         weight = 1.2
     elif pc == fifth:
@@ -240,12 +324,33 @@ def chord_tone_weight(pc: int, taste: TasteContext) -> float:
     return weight
 
 
+def contextual_degree_bonus(pc: int, taste: TasteContext) -> float:
+    """Reward 4th/7th only in their tightly restricted contexts."""
+    degree = scale_degree_of_pc(taste.loop, pc)
+    if degree is None:
+        return 0.0
+
+    bonus = 0.0
+    fourth_pc = scale_degree_pc(taste.loop, 4)
+    leading_pc = scale_degree_pc(taste.loop, 7)
+
+    if degree == 4 and pc == fourth_pc and fourth_degree_allowed(pc, taste):
+        bonus += 0.28
+
+    if degree == 7 and pc == leading_pc and seventh_degree_allowed(pc, taste):
+        bonus += 0.32
+
+    return bonus
+
+
 def melodic_suitability(pc: int, taste: TasteContext) -> float:
     """Overall idiomatic score for a pitch class in context (higher = better)."""
     score = 1.0
     score -= avoid_penalty(pc, taste)
     score += tendency_bonus(pc, taste)
     score += guide_tone_bonus(pc, taste)
+    score += pentatonic_bonus(pc, taste)
+    score += contextual_degree_bonus(pc, taste)
 
     if pc in taste.chord.pitch_classes:
         score += 0.1 * chord_tone_weight(pc, taste)
@@ -282,4 +387,68 @@ def passing_tone_allowed(pc: int, taste: TasteContext) -> bool:
     """Non-chord tones may appear on weak beats only if not harsh avoid notes."""
     if taste.pitch_role in ("strong", "cadence"):
         return False
-    return avoid_penalty(pc, taste) < 0.55
+    degree = scale_degree_of_pc(taste.loop, pc)
+    if degree in (4, 7):
+        return False
+    return avoid_penalty(pc, taste) < 0.45
+
+
+def are_adjacent_scale_degrees(degree_a: int, degree_b: int) -> bool:
+    """True when two scale degrees are neighbours (including 7↔1)."""
+    return (degree_b - degree_a) % 7 in (1, 6)
+
+
+def trailing_scale_alternations(degrees: list[int]) -> int:
+    """Count consecutive alternations between the same adjacent degree pair at the end."""
+    if len(degrees) < 2:
+        return 0
+
+    streak = 0
+    pair: tuple[int, int] | None = None
+    for i in range(len(degrees) - 1, 0, -1):
+        d_curr, d_prev = degrees[i], degrees[i - 1]
+        if d_curr == d_prev or not are_adjacent_scale_degrees(d_prev, d_curr):
+            break
+        normalized = (min(d_prev, d_curr), max(d_prev, d_curr))
+        if pair is None:
+            pair = normalized
+        elif normalized != pair:
+            break
+        streak += 1
+    return streak
+
+
+def would_exceed_alternation_limit(
+    loop: LoopContext,
+    recent_pitches: list[int],
+    candidate_pitch: int,
+    max_alternations: int = 3,
+) -> bool:
+    """True when adding candidate would continue an A-B-A-B… streak past the limit."""
+    degrees: list[int] = []
+    for pitch in recent_pitches:
+        degree = scale_degree_of_pc(loop, pitch % 12)
+        if degree is not None:
+            degrees.append(degree)
+    candidate_degree = scale_degree_of_pc(loop, candidate_pitch % 12)
+    if candidate_degree is None or not degrees:
+        return False
+
+    last_degree = degrees[-1]
+    if (
+        candidate_degree == last_degree
+        or not are_adjacent_scale_degrees(last_degree, candidate_degree)
+    ):
+        return False
+
+    pair = (min(last_degree, candidate_degree), max(last_degree, candidate_degree))
+    streak = trailing_scale_alternations(degrees)
+    if streak == 0:
+        return False
+
+    # Confirm the trailing streak uses the same adjacent pair.
+    d_curr, d_prev = degrees[-1], degrees[-2]
+    if (min(d_prev, d_curr), max(d_prev, d_curr)) != pair:
+        return False
+
+    return streak >= max_alternations

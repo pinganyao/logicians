@@ -18,10 +18,19 @@ from .quantize import ALLOWED_DURATIONS, POSITION_GRID, quantize_duration, quant
 from .melodic_taste import (
     TasteContext,
     best_pitch_among,
+    chord_harmonic_function,
+    fourth_degree_allowed,
     guide_tone_pcs,
+    is_main_beat,
+    is_predominant_fourth_chord,
+    is_subdominant_chord,
+    is_submediant_chord,
     melodic_suitability,
     passing_tone_allowed,
+    scale_degree_of_pc,
     scale_degree_pc,
+    seventh_degree_allowed,
+    would_exceed_alternation_limit,
 )
 
 ContourType = Literal["arch", "inverted_arch", "ascending", "descending", "static_hook", "call_response"]
@@ -55,16 +64,19 @@ DENSITY_PRESETS = {
     "sparse": {
         "rest_prob": 0.35,
         "scalic_prob": 0.0,
+        "pentatonic_scalic_prob": 0.06,
         "cells_per_bar": (1, 2),
     },
     "medium": {
-        "rest_prob": 0.28,
+        "rest_prob": 0.26,
         "scalic_prob": 0.0,
-        "cells_per_bar": (2, 3),
+        "pentatonic_scalic_prob": 0.15,
+        "cells_per_bar": (2, 4),
     },
     "busy": {
         "rest_prob": 0.18,
         "scalic_prob": 0.05,
+        "pentatonic_scalic_prob": 0.15,
         "cells_per_bar": (2, 4),
     },
 }
@@ -91,16 +103,19 @@ MAX_MELODIC_LEAP = 5  # minor 6th — pop melodies rarely exceed this
 PREFERRED_LEAP = 2
 
 INTERVAL_WEIGHTS = [
-    ("repeat", 0.10),
-    ("step", 0.55),
-    ("small_skip", 0.28),
-    ("large_leap", 0.06),
+    ("repeat", 0.08),
+    ("step", 0.62),
+    ("small_skip", 0.25),
+    ("large_leap", 0.04),
     ("very_large", 0.01),
 ]
 
 STRONG_BEAT_WEIGHTS = (0.88, 0.10, 0.02)
-WEAK_BEAT_WEIGHTS = (0.35, 0.50, 0.15)
+WEAK_BEAT_WEIGHTS = (0.40, 0.58, 0.02)
 ENDING_WEIGHTS = (0.92, 0.08, 0.0)
+
+# Pentatonic scale degrees (major / natural minor): 1, 2, 3, 5, 6.
+_PENTATONIC_DEGREES = frozenset({1, 2, 3, 5, 6})
 
 # Diatonic scale degrees (1-indexed) for major and natural minor.
 _MAJOR_DEGREES = [0, 2, 4, 5, 7, 9, 11]
@@ -140,12 +155,14 @@ class LoopHandoff:
 class _GenState:
     rng: random.Random
     last_pitch: int | None = None
+    recent_pitches: list[int] = field(default_factory=list)
     phrase_anchor: int | None = None
     consecutive_large_leaps: int = 0
     consecutive_repeats: int = 0
     consecutive_chromatic: int = 0
     consecutive_32nds: int = 0
     pending_leap_recovery: bool = False
+    at_phrase_start: bool = False
 
 
 class RuleBasedMelodyGenerator:
@@ -183,35 +200,33 @@ class RuleBasedMelodyGenerator:
         state = _GenState(rng=rng, phrase_anchor=motif.anchor_pitch)
         if handoff is not None:
             state.last_pitch = handoff.ending_pitch
+            state.recent_pitches = [handoff.ending_pitch]
 
-        if context.bars == 4:
-            notes = self._generate_pop_loop(
-                context, options, phrase_plan, motif, state, beats_per_bar,
+        for bar, section in phrase_plan.sections:
+            chord = self._chord_at_bar(context, bar)
+            bar_notes = self._generate_bar(
+                bar=bar,
+                section=section,
+                chord=chord,
+                next_chord=self._chord_at_bar(context, min(bar + 1, context.bars)),
+                context=context,
+                options=options,
+                preset=preset,
+                phrase_plan=phrase_plan,
+                accent_map=accent_map.get(bar, {}),
+                motif=motif,
+                state=state,
+                beats_per_bar=beats_per_bar,
+                is_first_bar=(bar == 1),
             )
-        else:
-            for bar, section in phrase_plan.sections:
-                chord = self._chord_at_bar(context, bar)
-                bar_notes = self._generate_bar(
-                    bar=bar,
-                    section=section,
-                    chord=chord,
-                    next_chord=self._chord_at_bar(context, min(bar + 1, context.bars)),
-                    context=context,
-                    options=options,
-                    preset=preset,
-                    phrase_plan=phrase_plan,
-                    accent_map=accent_map.get(bar, {}),
-                    motif=motif,
-                    state=state,
-                    beats_per_bar=beats_per_bar,
-                    is_first_bar=(bar == 1),
-                )
-                notes.extend(bar_notes)
+            notes.extend(bar_notes)
 
         notes = self._apply_entry_delay(notes, phrase_plan.entry_position, bar=1)
         if handoff is not None:
             notes = self._connect_loop_transition(notes, handoff, context, options, rng)
+        notes = self._apply_phrase_holds(notes, context, options, rng, beats_per_bar)
         notes = self._validate_and_repair(notes, context, options, beats_per_bar)
+        notes = self._enforce_alternation_limits(notes, context, options)
 
         return MelodyClip(bars=context.bars, notes=notes)
 
@@ -241,7 +256,7 @@ class RuleBasedMelodyGenerator:
                 4: "cadence",
             }
             cadences: dict[int, CadenceType] = {2: "HC", 4: "PAC"}
-            contour = rng.choice(["arch", "arch", "call_response"])
+            contour = rng.choice(["arch", "ascending", "static_hook", "call_response"])
             peak_bar = 2
             peak_position = Fraction(3, 2)
         else:
@@ -401,25 +416,23 @@ class RuleBasedMelodyGenerator:
         rng: random.Random,
         preset: dict,
     ) -> Motif:
-        """Short singable hook: mostly steps, pop rhythm."""
+        """Short pentatonic gesture — a seed, not a fixed pop hook."""
         chord = self._chord_at_bar(context, 1)
-        anchor = self._pick_chord_tone(chord, context, options, rng, register_center=True)
-        rhythm = rng.choice(POP_HOOK_RHYTHMS)
-        num_notes = len(rhythm)
+        anchor = self._pick_opening_pitch(chord, context, options, rng)
+        rhythm = rng.choice([
+            [QUAVER, QUAVER, CROTCHET],
+            [CROTCHET, QUAVER, QUAVER],
+            [QUAVER, QUAVER, QUAVER, QUAVER],
+            [QUAVER, CROTCHET, QUAVER],
+        ])
         intervals = [0]
         pitch = anchor
-        for i in range(1, num_notes):
-            step_dir = rng.choices([-1, 1, 2, -2], weights=[0.42, 0.42, 0.08, 0.08], k=1)[0]
-            if i == num_notes - 1 and rng.random() < 0.35:
-                step_dir = rng.choice([-2, 2])
-            if context.key_enforced:
-                next_pitch = self._scale_step(pitch, 1 if step_dir > 0 else -1, context, options)
-                if abs(step_dir) == 2:
-                    next_pitch = self._scale_step(
-                        next_pitch, 1 if step_dir > 0 else -1, context, options,
-                    )
-            else:
-                next_pitch = pitch + step_dir
+        direction = rng.choice([-1, 1])
+        for _ in range(1, len(rhythm)):
+            if rng.random() < 0.15:
+                direction = -direction
+            next_pitch = self._pentatonic_step(pitch, direction, context, options)
+            next_pitch = self._clamp_register(next_pitch, options)
             intervals.append(next_pitch - pitch)
             pitch = next_pitch
         return Motif(intervals=intervals, durations=rhythm, anchor_pitch=anchor)
@@ -432,6 +445,7 @@ class RuleBasedMelodyGenerator:
         motif: Motif,
         state: _GenState,
         beats_per_bar: int,
+        preset: dict,
     ) -> list[MelodyNote]:
         """4-bar pop: hook → varied hook → contrast → resolution."""
         notes: list[MelodyNote] = []
@@ -446,7 +460,7 @@ class RuleBasedMelodyGenerator:
             bar_cadence=phrase_plan.cadences.get(2, "none"),
         ))
         notes.extend(self._render_pop_contrast_bar(
-            bar=3, context=context, options=options, state=state,
+            bar=3, context=context, options=options, state=state, preset=preset,
         ))
         notes.extend(self._render_pop_resolution_bar(
             bar=4, context=context, options=options, state=state,
@@ -494,6 +508,11 @@ class RuleBasedMelodyGenerator:
             if is_cadence:
                 pitch = self._cadence_pitch(
                     pitch, bar_cadence, chord, context, options,
+                    taste=self._make_taste(
+                        chord, chord, context, state, "cadence", True,
+                        position, bar_cadence,
+                    ),
+                    rng=rng,
                 )
 
             notes.append(MelodyNote(
@@ -504,7 +523,7 @@ class RuleBasedMelodyGenerator:
                 duration=dur,
             ))
             position += dur
-            state.last_pitch = pitch
+            self._commit_pitch(state, pitch)
 
         return notes
 
@@ -514,24 +533,42 @@ class RuleBasedMelodyGenerator:
         context: LoopContext,
         options: GenerationOptions,
         state: _GenState,
+        preset: dict | None = None,
     ) -> list[MelodyNote]:
         chord = self._chord_at_bar(context, bar)
         rng = state.rng
-        rhythm = rng.choice(POP_ANSWER_RHYTHMS)
         notes: list[MelodyNote] = []
         position = Fraction(0)
-        pitch = self._nearest_chord_tone(
-            state.last_pitch or self._pick_chord_tone(
-                chord, context, options, rng, register_center=True,
-            ),
-            chord, context, options,
-        )
+        beats_per_bar = context.time_signature[0]
+
+        if preset and rng.random() < preset.get("pentatonic_scalic_prob", 0.0):
+            run, span = self._render_pentatonic_scalic_run(
+                bar, position, chord, context, options, state, section="B",
+            )
+            if run:
+                notes.extend(run)
+                position += span
+                state.at_phrase_start = False
+
+        rhythm = rng.choice(POP_ANSWER_RHYTHMS)
+        if notes:
+            pitch = notes[-1].pitch
+        else:
+            pitch = self._nearest_chord_tone(
+                state.last_pitch or self._pick_chord_tone(
+                    chord, context, options, rng, register_center=True,
+                ),
+                chord, context, options,
+            )
         direction = rng.choice([-1, 1])
 
         for i, dur in enumerate(rhythm):
-            if float(position) >= 3.75:
+            if float(position) >= beats_per_bar - float(SEMI):
                 break
-            if i > 0:
+            if i == 0 and not notes:
+                state.at_phrase_start = True
+            elif i > 0:
+                state.at_phrase_start = False
                 step_pitch = self._scale_step(pitch, direction, context, options)
                 step_pitch = self._clamp_register(step_pitch, options)
                 if abs(step_pitch - pitch) <= PREFERRED_LEAP:
@@ -547,7 +584,7 @@ class RuleBasedMelodyGenerator:
                 duration=dur,
             ))
             position += dur
-            state.last_pitch = pitch
+            self._commit_pitch(state, pitch)
 
         return notes
 
@@ -561,7 +598,10 @@ class RuleBasedMelodyGenerator:
     ) -> list[MelodyNote]:
         chord = self._chord_at_bar(context, bar)
         rng = state.rng
-        rhythm = rng.choice(POP_RESOLUTION_RHYTHMS)
+        if rng.random() < 0.40:
+            rhythm = [CROTCHET, MINIM] if rng.random() < 0.55 else [MINIM]
+        else:
+            rhythm = rng.choice(POP_RESOLUTION_RHYTHMS)
         notes: list[MelodyNote] = []
         position = Fraction(0)
         pitch = state.last_pitch or self._pick_chord_tone(
@@ -575,7 +615,13 @@ class RuleBasedMelodyGenerator:
                     allow_repeat=False,
                 )
             if i == len(rhythm) - 1:
-                pitch = self._cadence_pitch(pitch, "PAC", chord, context, options)
+                pitch = self._cadence_pitch(
+                    pitch, "PAC", chord, context, options, taste=self._make_taste(
+                        chord, chord, context, state, "cadence", True,
+                        position, "PAC",
+                    ),
+                    rng=rng,
+                )
             elif i == 0:
                 pitch = self._nearest_chord_tone(pitch, chord, context, options)
 
@@ -589,7 +635,7 @@ class RuleBasedMelodyGenerator:
                 duration=dur,
             ))
             position += dur
-            state.last_pitch = pitch
+            self._commit_pitch(state, pitch)
 
         return notes
 
@@ -640,17 +686,24 @@ class RuleBasedMelodyGenerator:
         context: LoopContext,
         options: GenerationOptions,
     ) -> int:
-        if abs(interval) <= PREFERRED_LEAP:
-            next_pitch = pitch + interval
-        elif context.key_enforced:
-            direction = 1 if interval > 0 else -1
-            next_pitch = pitch
-            for _ in range(2):
-                next_pitch = self._scale_step(next_pitch, direction, context, options)
-        else:
-            next_pitch = pitch + max(-PREFERRED_LEAP, min(PREFERRED_LEAP, interval))
+        return self._apply_interval_pentatonic(pitch, interval, context, options)
+
+    def _apply_interval_pentatonic(
+        self,
+        pitch: int,
+        interval: int,
+        context: LoopContext,
+        options: GenerationOptions,
+    ) -> int:
+        if interval == 0:
+            return pitch
+        direction = 1 if interval > 0 else -1
+        steps = max(1, min(2, abs(interval)))
+        result = pitch
+        for _ in range(steps):
+            result = self._pentatonic_step(result, direction, context, options)
         return self._clamp_register(
-            self._snap_to_scale(next_pitch, context, options), options,
+            self._snap_to_pentatonic(result, context, options), options,
         )
 
     def _nearest_chord_tone(
@@ -673,11 +726,171 @@ class RuleBasedMelodyGenerator:
         chord: ChordEvent,
         context: LoopContext,
         options: GenerationOptions,
+        taste: TasteContext | None = None,
+        rng: random.Random | None = None,
     ) -> int:
-        targets = self._cadence_target_pcs(cadence, context, chord)
-        return self._nearest_pitch_to_pcs(
-            from_pitch, targets, options, upward=(cadence == "HC"),
+        targets = self._stable_ending_pcs(cadence, context, chord)
+        candidates = self._pitches_for_pcs(targets, options)
+        if not candidates:
+            return self._clamp_register(from_pitch, options)
+        if taste is not None and rng is not None:
+            leading_pc = self._scale_degree_pc(context, 7)
+            if (
+                leading_pc in targets
+                and seventh_degree_allowed(leading_pc, taste)
+                and rng.random() < 0.28
+            ):
+                leading_candidates = [p for p in candidates if p % 12 == leading_pc]
+                if leading_candidates:
+                    return min(leading_candidates, key=lambda p: abs(p - from_pitch))
+            return best_pitch_among(candidates, taste, rng, min_score=0.5)
+        return min(candidates, key=lambda p: (abs(p - from_pitch), p > from_pitch))
+
+    def _stable_ending_pcs(
+        self, cadence: CadenceType, context: LoopContext, chord: ChordEvent,
+    ) -> set[int]:
+        """Chord tones suitable for phrase endings — stable, context-aware."""
+        chord_pcs = self._effective_chord_pcs(chord, context)
+        root = chord.root % 12
+        third = (chord.root + (3 if "min" in chord.quality else 4)) % 12
+        fifth = (chord.root + 7) % 12
+        leading_pc = self._scale_degree_pc(context, 7)
+
+        preferred = {pc for pc in (root, third, fifth) if pc in chord_pcs}
+        if not preferred:
+            preferred = set(chord_pcs)
+
+        if (
+            chord_harmonic_function(chord, context) == "dominant"
+            and leading_pc in chord_pcs
+        ):
+            preferred.add(leading_pc)
+
+        if cadence == "HC" and fifth in chord_pcs:
+            preferred.add(fifth)
+
+        return preferred
+
+    def _pentatonic_pitch_classes(self, context: LoopContext) -> set[int]:
+        degrees = _MAJOR_DEGREES if context.key_mode == "major" else _MINOR_DEGREES
+        pcs = {(context.key_root + degrees[d - 1]) % 12 for d in _PENTATONIC_DEGREES}
+        if context.key_enforced:
+            pcs &= context.scale_pitch_classes
+        return pcs
+
+    def _pentatonic_pitches_in_register(
+        self, context: LoopContext, options: GenerationOptions,
+    ) -> list[int]:
+        return sorted(self._pitches_for_pcs(self._pentatonic_pitch_classes(context), options))
+
+    def _render_pentatonic_scalic_run(
+        self,
+        bar: int,
+        start: Fraction,
+        chord: ChordEvent,
+        context: LoopContext,
+        options: GenerationOptions,
+        state: _GenState,
+        section: PhraseSection,
+        remaining: Fraction | None = None,
+    ) -> tuple[list[MelodyNote], Fraction]:
+        """Overlapping ascending pentatonic triplets in semiquavers (e.g. C-D-F-D-F-G)."""
+        rng = state.rng
+        pool = self._pentatonic_pitches_in_register(context, options)
+        if len(pool) < 5:
+            return [], Fraction(0)
+
+        max_semis = int(float(remaining or Fraction(3)) / float(SEMI))
+        num_groups = min(rng.randint(2, 4), max(2, (max_semis - 2) // 1))
+        num_notes = num_groups + 2
+        if num_notes < 4:
+            return [], Fraction(0)
+
+        if state.last_pitch is not None:
+            start_idx = min(
+                range(len(pool) - num_groups - 2),
+                key=lambda i: abs(pool[i] - state.last_pitch),
+            )
+        else:
+            start_idx = rng.randint(0, max(0, len(pool) - num_groups - 3))
+
+        run_pitches: list[int] = []
+        for g in range(num_groups):
+            base = start_idx + g
+            if base + 2 >= len(pool):
+                break
+            triplet = [pool[base], pool[base + 1], pool[base + 2]]
+            if g == 0:
+                run_pitches.extend(triplet)
+            else:
+                run_pitches.extend(triplet[1:])
+
+        if len(run_pitches) < 4:
+            return [], Fraction(0)
+
+        durations = [SEMI] * len(run_pitches)
+        span = sum(durations, Fraction(0))
+        if remaining is not None and span > remaining:
+            keep = int(float(remaining) / float(SEMI))
+            if keep < 4:
+                return [], Fraction(0)
+            run_pitches = run_pitches[:keep]
+            durations = durations[:keep]
+            span = sum(durations, Fraction(0))
+
+        notes: list[MelodyNote] = []
+        pos = start
+        for i, (pitch, dur) in enumerate(zip(run_pitches, durations)):
+            notes.append(MelodyNote(
+                pitch=pitch,
+                velocity=self._choose_velocity(rng, i == 0, False, False, section),
+                bar=bar,
+                position=pos,
+                duration=dur,
+            ))
+            self._commit_pitch(state, pitch)
+            pos += dur
+        state.at_phrase_start = False
+        return notes, span
+
+    def _apply_phrase_holds(
+        self,
+        notes: list[MelodyNote],
+        context: LoopContext,
+        options: GenerationOptions,
+        rng: random.Random,
+        beats_per_bar: int,
+    ) -> list[MelodyNote]:
+        """Sometimes sustain the last note of a phrase or the loop."""
+        if not notes or rng.random() > 0.35:
+            return notes
+
+        loop_end = context.bars * beats_per_bar
+        sorted_notes = sorted(notes, key=lambda n: (n.bar, float(n.position)))
+        last = sorted_notes[-1]
+        last_start = (last.bar - 1) * beats_per_bar + float(last.position)
+        last_end = last_start + float(last.duration)
+        room = loop_end - last_end
+        if room < float(QUAVER):
+            return notes
+
+        chord = self._chord_at_bar(context, last.bar)
+        stable = self._stable_ending_pcs("PAC", context, chord)
+        if last.pitch % 12 not in stable:
+            return notes
+
+        extra = min(room, float(MINIM) - float(last.duration))
+        if extra < float(SEMI):
+            return notes
+
+        held = MelodyNote(
+            pitch=last.pitch,
+            velocity=max(1, last.velocity - 8),
+            bar=last.bar,
+            position=last.position,
+            duration=Fraction(last.duration + extra).limit_denominator(24),
         )
+        return sorted_notes[:-1] + [held]
 
     def _make_taste(
         self,
@@ -689,17 +902,108 @@ class RuleBasedMelodyGenerator:
         is_ending: bool,
         beat_position: Fraction,
         bar_cadence: CadenceType,
+        bar: int | None = None,
+        is_loop_ending: bool = False,
     ) -> TasteContext:
+        if bar is not None and not is_loop_ending:
+            is_loop_ending = is_ending and bar == context.bars
         return TasteContext(
             chord=chord,
             next_chord=next_chord,
             loop=context,
             pitch_role=pitch_role,
             is_ending=is_ending,
+            is_loop_ending=is_loop_ending,
             last_pitch=state.last_pitch,
             beat_position=beat_position,
             bar_cadence=bar_cadence,
         )
+
+    def _commit_pitch(self, state: _GenState, pitch: int) -> None:
+        state.last_pitch = pitch
+        state.recent_pitches.append(pitch)
+        if len(state.recent_pitches) > 8:
+            state.recent_pitches.pop(0)
+
+    def _avoid_excessive_alternation(
+        self,
+        pitch: int,
+        state: _GenState,
+        context: LoopContext,
+        options: GenerationOptions,
+        rng: random.Random,
+    ) -> int:
+        if not state.recent_pitches:
+            return pitch
+        if not would_exceed_alternation_limit(context, state.recent_pitches, pitch):
+            return pitch
+
+        pool = self._pentatonic_pitches_in_register(context, options)
+        if not pool:
+            pool = sorted(self._pitches_for_pcs(context.scale_pitch_classes, options))
+        if not pool:
+            return pitch
+
+        last = state.last_pitch
+        if last is None:
+            return pitch
+
+        forbidden_degrees: set[int] = set()
+        recent_degrees = [
+            d for p in state.recent_pitches[-4:]
+            if (d := scale_degree_of_pc(context, p % 12)) is not None
+        ]
+        if len(recent_degrees) >= 2:
+            forbidden_degrees = {recent_degrees[-1], recent_degrees[-2]}
+
+        candidates = [
+            p for p in pool
+            if p != pitch
+            and not would_exceed_alternation_limit(context, state.recent_pitches, p)
+            and scale_degree_of_pc(context, p % 12) not in forbidden_degrees
+        ]
+        if not candidates:
+            candidates = [
+                p for p in pool
+                if p != pitch
+                and not would_exceed_alternation_limit(context, state.recent_pitches, p)
+            ]
+        if not candidates:
+            return pitch
+        return min(candidates, key=lambda p: abs(p - last))
+
+    def _enforce_alternation_limits(
+        self,
+        notes: list[MelodyNote],
+        context: LoopContext,
+        options: GenerationOptions,
+    ) -> list[MelodyNote]:
+        if not notes:
+            return notes
+
+        ordered = sorted(notes, key=lambda n: (n.bar, float(n.position)))
+        recent: list[int] = []
+        fixed: list[MelodyNote] = []
+        rng = random.Random(0)
+
+        for note in ordered:
+            stub = _GenState(
+                rng=rng,
+                last_pitch=recent[-1] if recent else None,
+                recent_pitches=recent[-8:],
+            )
+            pitch = self._avoid_excessive_alternation(
+                note.pitch, stub, context, options, rng,
+            )
+            recent = (recent + [pitch])[-8:]
+            fixed.append(MelodyNote(
+                pitch=pitch,
+                velocity=note.velocity,
+                bar=note.bar,
+                position=note.position,
+                duration=note.duration,
+            ))
+        return fixed
 
     def _refine_with_taste(
         self,
@@ -769,13 +1073,7 @@ class RuleBasedMelodyGenerator:
     def _cadence_target_pcs(
         self, cadence: CadenceType, context: LoopContext, chord: ChordEvent,
     ) -> set[int]:
-        if cadence == "HC":
-            return {self._scale_degree_pc(context, 5), self._scale_degree_pc(context, 7)}
-        if cadence == "PAC":
-            tonic = self._scale_degree_pc(context, 1)
-            third = self._scale_degree_pc(context, 3)
-            return {tonic, third} & self._effective_chord_pcs(chord, context) or {tonic}
-        return self._effective_chord_pcs(chord, context)
+        return self._stable_ending_pcs(cadence, context, chord)
 
     def _chord_change_imminent(
         self, position: Fraction, beats_per_bar: int, chord: ChordEvent, next_chord: ChordEvent,
@@ -801,6 +1099,11 @@ class RuleBasedMelodyGenerator:
         is_first_bar: bool,
     ) -> list[MelodyNote]:
         if section == "A" and is_first_bar:
+            if state.rng.random() < 0.35:
+                return self._fill_bar_from(
+                    bar, Fraction(0), beats_per_bar, chord, next_chord, context, options,
+                    preset, phrase_plan, state, section, accent_map,
+                )
             motif_notes = self._motif_to_notes(
                 motif, bar, chord, context, options, state, phrase_plan, section
             )
@@ -808,9 +1111,6 @@ class RuleBasedMelodyGenerator:
                 cursor = motif_notes[-1].position + motif_notes[-1].duration
             else:
                 cursor = Fraction(0)
-            # Leave breathing room after motif; fill second half of bar.
-            if cursor < Fraction(beats_per_bar) / 2:
-                cursor = max(cursor, Fraction(beats_per_bar) / 2)
             tail = self._fill_bar_from(
                 bar, cursor, beats_per_bar, chord, next_chord, context, options,
                 preset, phrase_plan, state, section, accent_map,
@@ -818,6 +1118,11 @@ class RuleBasedMelodyGenerator:
             return motif_notes + tail
 
         if section == "A_prime":
+            if state.rng.random() < 0.40:
+                return self._fill_bar_from(
+                    bar, Fraction(0), beats_per_bar, chord, next_chord, context, options,
+                    preset, phrase_plan, state, section, accent_map,
+                )
             motif_notes = self._vary_motif(
                 motif, bar, chord, context, options, state, phrase_plan, section
             )
@@ -874,26 +1179,47 @@ class RuleBasedMelodyGenerator:
             gap = self._metric_gap(rng, preset, section, cursor, bar_end)
             if gap > 0 and remaining > gap + QUAVER:
                 cursor += gap
+                state.at_phrase_start = True
                 remaining = bar_end - cursor
                 if remaining < QUAVER:
                     break
 
+            use_pentatonic = (
+                not scalic_used
+                and not is_resolution
+                and remaining >= SEMI * 4
+                and rng.random() < preset.get("pentatonic_scalic_prob", 0.0)
+                and (cursor % 1) in (Fraction(0), Fraction(1, 2), Fraction(1, 4))
+            )
             use_scalic = (
                 not scalic_used
                 and not is_resolution
+                and not use_pentatonic
                 and remaining >= CROTCHET
                 and rng.random() < preset["scalic_prob"] * (1.4 if formal_role == "continuation" else 1.0)
                 and (cursor % 1) in (Fraction(0), Fraction(1, 2))
             )
 
-            if use_scalic:
+            chunk: list[MelodyNote] = []
+            span = Fraction(0)
+
+            if use_pentatonic:
+                chunk, span = self._render_pentatonic_scalic_run(
+                    bar, cursor, chord, context, options, state, section,
+                    remaining=remaining,
+                )
+                if chunk:
+                    scalic_used = True
+
+            if not chunk and use_scalic:
                 chunk, span = self._render_scalic_passage(
                     bar, cursor, chord, next_chord, context, options,
                     state, phrase_plan, section,
                     target_cadence=bar_cadence if float(cursor) >= float(bar_end) - 2 else "none",
                 )
                 scalic_used = True
-            else:
+
+            if not chunk:
                 figure_name, span = self._pick_figure(
                     remaining, section, rng, is_resolution, fragmented=use_fragmentation,
                 )
@@ -972,6 +1298,7 @@ class RuleBasedMelodyGenerator:
         rng = state.rng
         notes: list[MelodyNote] = []
         pos = start
+        state.at_phrase_start = float(start) == 0.0 or start % 1 == 0
         for i, dur in enumerate(durations):
             beat_in_bar = pos % 1
             is_strong = self._is_strong_beat(pos) and i == 0
@@ -997,6 +1324,14 @@ class RuleBasedMelodyGenerator:
                 bar_cadence=bar_cadence if is_last_in_bar else "none",
                 beat_position=pos,
             )
+            if (
+                state.last_pitch is not None
+                and dur <= QUAVER
+                and not state.at_phrase_start
+            ):
+                pitch = self._conjunct_pitch_for_fast_note(
+                    state.last_pitch, pitch, context, options,
+                )
             notes.append(MelodyNote(
                 pitch=pitch,
                 velocity=self._choose_velocity(rng, is_strong, is_peak, False, section),
@@ -1004,7 +1339,8 @@ class RuleBasedMelodyGenerator:
                 position=pos,
                 duration=dur,
             ))
-            state.last_pitch = pitch
+            self._commit_pitch(state, pitch)
+            state.at_phrase_start = False
             pos += dur
         return notes
 
@@ -1045,7 +1381,9 @@ class RuleBasedMelodyGenerator:
         if target_pitch == start_pitch:
             direction = rng.choice([-1, 1])
 
-        pitch_pool = context.scale_pitch_classes
+        pitch_pool = self._pentatonic_pitch_classes(context) & context.scale_pitch_classes
+        if not pitch_pool:
+            pitch_pool = context.scale_pitch_classes
         pitch = start_pitch
         notes: list[MelodyNote] = []
         pos = start
@@ -1063,7 +1401,7 @@ class RuleBasedMelodyGenerator:
                 position=pos,
                 duration=dur,
             ))
-            state.last_pitch = pitch
+            self._commit_pitch(state, pitch)
             pos += dur
 
         if notes:
@@ -1076,7 +1414,7 @@ class RuleBasedMelodyGenerator:
                 ),
                 context, options,
             )
-            state.last_pitch = notes[-1].pitch
+            self._commit_pitch(state, notes[-1].pitch)
 
         return notes, span
 
@@ -1140,7 +1478,7 @@ class RuleBasedMelodyGenerator:
             bar_cadence="PAC" if is_ending else "none",
             beat_position=position,
         )
-        state.last_pitch = pitch
+        self._commit_pitch(state, pitch)
         return MelodyNote(
             pitch=pitch,
             velocity=self._choose_velocity(rng, True, False, is_ending, section),
@@ -1152,12 +1490,117 @@ class RuleBasedMelodyGenerator:
     def _scale_step(
         self, pitch: int, direction: int, context: LoopContext, options: GenerationOptions
     ) -> int:
+        if context.key_enforced:
+            return self._pentatonic_step(pitch, direction, context, options)
         pitches = sorted(self._pitches_for_pcs(context.scale_pitch_classes, options))
         if not pitches:
             return pitch + direction * 2
         idx = min(range(len(pitches)), key=lambda i: abs(pitches[i] - pitch))
         new_idx = max(0, min(len(pitches) - 1, idx + direction))
         return pitches[new_idx]
+
+    def _pentatonic_step(
+        self, pitch: int, direction: int, context: LoopContext, options: GenerationOptions,
+    ) -> int:
+        pitches = self._pentatonic_pitches_in_register(context, options)
+        if not pitches:
+            return self._scale_step_diatonic(pitch, direction, context, options)
+        idx = min(range(len(pitches)), key=lambda i: abs(pitches[i] - pitch))
+        new_idx = max(0, min(len(pitches) - 1, idx + direction))
+        return pitches[new_idx]
+
+    def _scale_step_diatonic(
+        self, pitch: int, direction: int, context: LoopContext, options: GenerationOptions,
+    ) -> int:
+        pitches = sorted(self._pitches_for_pcs(context.scale_pitch_classes, options))
+        if not pitches:
+            return pitch + direction * 2
+        idx = min(range(len(pitches)), key=lambda i: abs(pitches[i] - pitch))
+        new_idx = max(0, min(len(pitches) - 1, idx + direction))
+        return pitches[new_idx]
+
+    def _is_pentatonic_pc(self, context: LoopContext, pc: int) -> bool:
+        rel = (pc - context.key_root) % 12
+        degrees = _MAJOR_DEGREES if context.key_mode == "major" else _MINOR_DEGREES
+        for i, interval in enumerate(degrees, start=1):
+            if interval == rel:
+                return i in _PENTATONIC_DEGREES
+        return False
+
+    def _conjunct_pitch_for_fast_note(
+        self,
+        from_pitch: int,
+        candidate: int,
+        context: LoopContext,
+        options: GenerationOptions,
+    ) -> int:
+        """Fast subdivisions should move stepwise within the pentatonic pool."""
+        if abs(candidate - from_pitch) <= 2:
+            return self._clamp_register(
+                self._snap_to_pentatonic(candidate, context, options), options,
+            )
+        for direction in (1, -1):
+            stepped = self._pentatonic_step(from_pitch, direction, context, options)
+            if abs(stepped - from_pitch) <= 2:
+                return stepped
+        return from_pitch
+
+    def _snap_prefer_pentatonic(
+        self,
+        pitch: int,
+        context: LoopContext,
+        options: GenerationOptions,
+        taste: TasteContext | None = None,
+    ) -> int:
+        """Snap toward pentatonic, but keep 4th/7th when the harmony supports them."""
+        pitch = self._clamp_register(pitch, options)
+        pc = pitch % 12
+        if taste is not None:
+            if melodic_suitability(pc, taste) >= 0.45:
+                return pitch
+            fourth_pc = self._scale_degree_pc(context, 4)
+            if (
+                pc == fourth_pc
+                and fourth_degree_allowed(pc, taste)
+            ):
+                return pitch
+            if (
+                pc == self._scale_degree_pc(context, 7)
+                and seventh_degree_allowed(pc, taste)
+            ):
+                return pitch
+        if pc in self._pentatonic_pitch_classes(context):
+            return pitch
+        return self._snap_to_pentatonic(pitch, context, options)
+
+    def _snap_to_pentatonic(
+        self, pitch: int, context: LoopContext, options: GenerationOptions,
+    ) -> int:
+        penta = self._pentatonic_pitch_classes(context)
+        if pitch % 12 in penta:
+            return self._clamp_register(pitch, options)
+        candidates = self._pitches_for_pcs(penta, options)
+        if not candidates:
+            return self._snap_to_scale(pitch, context, options)
+        return min(candidates, key=lambda p: abs(p - pitch))
+
+    def _pick_opening_pitch(
+        self, chord: ChordEvent, context: LoopContext, options: GenerationOptions,
+        rng: random.Random,
+    ) -> int:
+        """Opening on a comfortable pentatonic chord tone."""
+        chord_pcs = self._effective_chord_pcs(chord, context)
+        penta_pcs = self._pentatonic_pitch_classes(context) & chord_pcs
+        pool_pcs = penta_pcs or chord_pcs
+        candidates = self._pitches_for_pcs(pool_pcs, options)
+        if not candidates:
+            return self._clamp_register(60 + chord.root, options)
+        center = (options.register_low + options.register_high) // 2
+        weights = [
+            1.0 - 0.3 * min(1.0, abs(p - center) / max(1, (options.register_high - options.register_low) // 2))
+            for p in candidates
+        ]
+        return rng.choices(candidates, weights=weights, k=1)[0]
 
     def _motif_to_notes(
         self, motif: Motif, bar: int, chord: ChordEvent,
@@ -1169,8 +1612,7 @@ class RuleBasedMelodyGenerator:
         position = Fraction(0)
         for i, (interval, dur) in enumerate(zip(motif.intervals, motif.durations)):
             if i > 0:
-                pitch = self._clamp_register(pitch + interval, options)
-                pitch = self._snap_to_scale(pitch, context, options)
+                pitch = self._apply_interval_pentatonic(pitch, interval, context, options)
             notes.append(MelodyNote(
                 pitch=pitch,
                 velocity=self._choose_velocity(state.rng, i == 0, False, False, section),
@@ -1179,7 +1621,7 @@ class RuleBasedMelodyGenerator:
                 duration=dur,
             ))
             position += dur
-            state.last_pitch = pitch
+            self._commit_pitch(state, pitch)
         return notes
 
     def _vary_motif(
@@ -1199,13 +1641,13 @@ class RuleBasedMelodyGenerator:
             else:
                 inv = -interval if rng.random() < 0.3 else interval
                 if context.key_enforced:
-                    pitch = self._scale_step(pitch, 1 if inv >= 0 else -1, context, options)
+                    pitch = self._pentatonic_step(pitch, 1 if inv >= 0 else -1, context, options)
                 else:
                     pitch = self._clamp_register(
                         pitch + inv + (transposition if i == 1 else 0), options
                     )
                 if context.key_enforced:
-                    pitch = self._snap_to_scale(pitch, context, options)
+                    pitch = self._snap_to_pentatonic(pitch, context, options)
             if position >= context.time_signature[0]:
                 break
             notes.append(MelodyNote(
@@ -1216,7 +1658,7 @@ class RuleBasedMelodyGenerator:
                 duration=dur,
             ))
             position += dur
-            state.last_pitch = pitch
+            self._commit_pitch(state, pitch)
         return notes
 
     def _choose_pitch(
@@ -1238,7 +1680,27 @@ class RuleBasedMelodyGenerator:
         rng = state.rng
         taste = self._make_taste(
             chord, next_chord, context, state, pitch_role, is_ending, beat_position, bar_cadence,
+            bar=bar,
         )
+
+        if (
+            pitch_role == "strong"
+            and is_main_beat(beat_position)
+            and is_predominant_fourth_chord(chord, context)
+        ):
+            if rng.random() < 0.45:
+                fourth_pc = self._scale_degree_pc(context, 4)
+                fourth_pitches = self._pitches_for_pcs({fourth_pc}, options)
+                if fourth_pitches:
+                    pitch = best_pitch_among(fourth_pitches, taste, rng)
+                    pitch = self._clamp_register(pitch, options)
+                    if state.last_pitch is not None:
+                        pitch = self._apply_motion_rules(
+                            pitch, state, options, rng, is_peak, context,
+                            allow_disjunct=state.at_phrase_start,
+                        )
+                    pitch = self._avoid_excessive_alternation(pitch, state, context, options, rng)
+                    return self._snap_prefer_pentatonic(pitch, context, options, taste=taste)
 
         if pitch_role == "cadence" and bar_cadence != "none":
             targets = self._cadence_target_pcs(bar_cadence, context, chord)
@@ -1299,14 +1761,24 @@ class RuleBasedMelodyGenerator:
         pitch = self._resolve_tendencies(pitch, taste, context, options, rng)
 
         if state.last_pitch is not None:
-            pitch = self._apply_motion_rules(pitch, state, options, rng, is_peak, context)
+            pitch = self._apply_motion_rules(
+                pitch, state, options, rng, is_peak, context,
+                allow_disjunct=state.at_phrase_start,
+            )
+            state.at_phrase_start = False
 
         pitch = self._clamp_register(pitch, options)
-        pitch = self._snap_to_scale(pitch, context, options)
+        pitch = self._snap_prefer_pentatonic(pitch, context, options, taste=taste)
+        pitch = self._avoid_excessive_alternation(pitch, state, context, options, rng)
 
         pool = self._pitches_for_pcs(self._effective_chord_pcs(chord, context), options)
         if pitch_role == "weak":
-            non_chord = context.scale_pitch_classes - chord.pitch_classes
+            non_chord = self._pentatonic_pitch_classes(context) - chord.pitch_classes
+            non_chord -= {
+                self._scale_degree_pc(context, 4),
+                self._scale_degree_pc(context, 7),
+            }
+            non_chord -= chord.pitch_classes
             pool = pool + self._pitches_for_pcs(non_chord, options)
         return self._refine_with_taste(pitch, taste, pool, rng)
 
@@ -1323,10 +1795,12 @@ class RuleBasedMelodyGenerator:
         """Passing or neighbor tone between chord tones (weak-beat embellishment)."""
         if from_pitch == to_pitch:
             neighbor_dir = rng.choice([-1, 1])
-            candidate = self._scale_step(from_pitch, neighbor_dir, context, options)
-            if taste and not passing_tone_allowed(candidate % 12, taste):
-                return None
-            return candidate
+            candidate = self._scale_step_diatonic(
+                from_pitch, neighbor_dir, context, options,
+            )
+            if taste and passing_tone_allowed(candidate % 12, taste):
+                return candidate
+            return self._pentatonic_step(from_pitch, neighbor_dir, context, options)
 
         diff = to_pitch - from_pitch
         if abs(diff) == 1:
@@ -1334,13 +1808,15 @@ class RuleBasedMelodyGenerator:
 
         strategy = rng.choice(["passing", "passing", "neighbor"])
         if strategy == "neighbor":
-            candidate = self._scale_step(from_pitch, rng.choice([-1, 1]), context, options)
+            candidate = self._scale_step_diatonic(
+                from_pitch, rng.choice([-1, 1]), context, options,
+            )
             if taste and not passing_tone_allowed(candidate % 12, taste):
                 return None
             return candidate
 
         step_dir = 1 if diff > 0 else -1
-        mid = self._scale_step(from_pitch, step_dir, context, options)
+        mid = self._scale_step_diatonic(from_pitch, step_dir, context, options)
         if mid % 12 in self._effective_chord_pcs(chord, context):
             return None
         if taste and not passing_tone_allowed(mid % 12, taste):
@@ -1416,11 +1892,13 @@ class RuleBasedMelodyGenerator:
         rng: random.Random,
         max_steps: int = 2,
     ) -> int:
-        pitches = sorted(self._pitches_for_pcs(context.scale_pitch_classes, options))
+        pitches = self._pentatonic_pitches_in_register(context, options)
+        if not pitches:
+            pitches = sorted(self._pitches_for_pcs(context.scale_pitch_classes, options))
         if not pitches:
             return pitch
         idx = min(range(len(pitches)), key=lambda i: abs(pitches[i] - pitch))
-        step = rng.randint(-max_steps, max_steps)
+        step = rng.randint(-max_steps, max_steps) or 1
         new_idx = max(0, min(len(pitches) - 1, idx + step))
         return pitches[new_idx]
 
@@ -1456,7 +1934,13 @@ class RuleBasedMelodyGenerator:
         rng: random.Random, contour_bias: int | None = None,
         taste: TasteContext | None = None,
     ) -> int:
-        non_chord = context.scale_pitch_classes - chord.pitch_classes
+        non_chord = self._pentatonic_pitch_classes(context) - chord.pitch_classes
+        fourth_pc = self._scale_degree_pc(context, 4)
+        leading_pc = self._scale_degree_pc(context, 7)
+        non_chord -= {fourth_pc, leading_pc}
+        if taste is not None and fourth_degree_allowed(fourth_pc, taste):
+            non_chord |= {fourth_pc}
+        non_chord -= chord.pitch_classes
         if not non_chord:
             return self._pick_chord_tone(chord, context, options, rng, contour_bias=contour_bias, taste=taste)
         pitches = self._pitches_for_pcs(non_chord, options)
@@ -1489,6 +1973,7 @@ class RuleBasedMelodyGenerator:
     def _apply_motion_rules(
         self, pitch: int, state: _GenState, options: GenerationOptions,
         rng: random.Random, is_peak: bool, context: LoopContext,
+        allow_disjunct: bool = False,
     ) -> int:
         if state.last_pitch is None:
             return pitch
@@ -1506,12 +1991,23 @@ class RuleBasedMelodyGenerator:
         else:
             state.consecutive_repeats = 0
 
+        if not allow_disjunct and abs_interval > PREFERRED_LEAP:
+            direction = 1 if interval > 0 else -1
+            if context.key_enforced:
+                stepped = state.last_pitch
+                for _ in range(PREFERRED_LEAP):
+                    stepped = self._pentatonic_step(stepped, direction, context, options)
+                pitch = stepped
+            else:
+                pitch = state.last_pitch + direction * PREFERRED_LEAP
+            abs_interval = abs(pitch - state.last_pitch)
+
         if abs_interval > MAX_MELODIC_LEAP:
             direction = 1 if interval > 0 else -1
             if context.key_enforced:
                 pitch = state.last_pitch
                 for _ in range(PREFERRED_LEAP):
-                    pitch = self._scale_step(pitch, direction, context, options)
+                    pitch = self._pentatonic_step(pitch, direction, context, options)
             else:
                 pitch = state.last_pitch + direction * PREFERRED_LEAP
             state.pending_leap_recovery = True
@@ -1522,7 +2018,9 @@ class RuleBasedMelodyGenerator:
             state.consecutive_large_leaps += 1
             if state.consecutive_large_leaps > 1:
                 if context.key_enforced:
-                    pitch = self._pick_scale_neighbor(state.last_pitch, context, options, rng, max_steps=1)
+                    pitch = self._pentatonic_step(
+                        state.last_pitch, rng.choice([-1, 1]), context, options,
+                    )
                 else:
                     direction = -1 if interval > 0 else 1
                     pitch = state.last_pitch + direction
@@ -1586,8 +2084,9 @@ class RuleBasedMelodyGenerator:
     ) -> list[MelodyNote]:
         loop_end = context.bars * beats_per_bar
         repaired: list[MelodyNote] = []
+        sorted_notes = sorted(notes, key=lambda n: (n.bar, float(n.position)))
 
-        for note in sorted(notes, key=lambda n: (n.bar, float(n.position))):
+        for idx, note in enumerate(sorted_notes):
             start = (note.bar - 1) * beats_per_bar + float(note.position)
             if start >= loop_end:
                 continue
@@ -1595,7 +2094,36 @@ class RuleBasedMelodyGenerator:
                 continue
 
             pitch = self._clamp_register(note.pitch, options)
-            pitch = self._snap_to_scale(pitch, context, options)
+            is_last = idx == len(sorted_notes) - 1
+            last_pitch = sorted_notes[idx - 1].pitch if idx > 0 else None
+            stub = _GenState(rng=random.Random(0), last_pitch=last_pitch)
+            if idx > 0:
+                recent = [n.pitch for n in sorted_notes[max(0, idx - 8):idx]]
+                stub.recent_pitches = recent
+            taste = self._make_taste(
+                self._chord_at_bar(context, note.bar),
+                self._chord_at_bar(context, min(note.bar + 1, context.bars)),
+                context, stub,
+                "cadence" if is_last else "weak",
+                is_last, note.position, "PAC" if is_last else "none",
+                bar=note.bar,
+                is_loop_ending=is_last,
+            )
+            if is_last:
+                pitch = self._snap_to_scale(pitch, context, options)
+            else:
+                pitch = self._snap_prefer_pentatonic(pitch, context, options, taste=taste)
+            fourth_pc = self._scale_degree_pc(context, 4)
+            leading_pc = self._scale_degree_pc(context, 7)
+            if not fourth_degree_allowed(pitch % 12, taste):
+                if pitch % 12 == fourth_pc:
+                    pitch = self._snap_to_pentatonic(pitch, context, options)
+            if not seventh_degree_allowed(pitch % 12, taste):
+                if pitch % 12 == leading_pc:
+                    pitch = self._snap_to_pentatonic(pitch, context, options)
+            pitch = self._avoid_excessive_alternation(
+                pitch, stub, context, options, random.Random(0),
+            )
             end = start + float(note.duration)
             if end > loop_end:
                 note = MelodyNote(
@@ -1641,5 +2169,18 @@ class RuleBasedMelodyGenerator:
                     )
 
             repaired.append(note)
+
+        if repaired:
+            last = repaired[-1]
+            chord = self._chord_at_bar(context, last.bar)
+            stable = self._stable_ending_pcs("PAC", context, chord)
+            if last.pitch % 12 not in stable:
+                candidates = self._pitches_for_pcs(stable, options)
+                if candidates:
+                    nearest = min(candidates, key=lambda p: abs(p - last.pitch))
+                    repaired[-1] = MelodyNote(
+                        pitch=nearest, velocity=last.velocity,
+                        bar=last.bar, position=last.position, duration=last.duration,
+                    )
 
         return repaired

@@ -45,6 +45,7 @@ def _taste(loop, pitch_role="strong", last_pitch=None):
         loop=loop,
         pitch_role=pitch_role,
         is_ending=False,
+        is_loop_ending=False,
         last_pitch=last_pitch,
         beat_position=Fraction(0),
         bar_cadence="none",

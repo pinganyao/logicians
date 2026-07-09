@@ -5,6 +5,7 @@ src/logicians/analysis.py
 src/logicians/cli.py
 src/logicians/export.py
 src/logicians/generator.py
+src/logicians/melodic_taste.py
 src/logicians/midi_io.py
 src/logicians/models.py
 src/logicians/quantize.py
@@ -18,4 +19,5 @@ src/logicians.egg-info/top_level.txt
 tests/test_analysis.py
 tests/test_capture.py
 tests/test_generator.py
+tests/test_melodic_taste.py
 tests/test_quantize.py
