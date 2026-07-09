@@ -11,7 +11,7 @@ from typing import Optional
 import typer
 
 from .analysis import build_loop_context
-from .bass import BassOptions, RuleBasedBassGenerator
+from .bass import BassOptions, BassGenerator
 from .drums import DrumOptions, RuleBasedDrumGenerator
 from .groove import MarkovDrumModel
 from .export import export_melody_from_context
@@ -184,17 +184,11 @@ def live(
         "(e.g. funk, rock, jazz, latin, hiphop) instead of varying the input. "
         "Use --drum-style list to see all styles.",
     ),
-    bass_style: Optional[str] = typer.Option(
-        None,
-        "--bass-style",
-        help="Use a GMD style's kick rhythm as the bass groove. Defaults to "
-        "--drum-style when that is set.",
-    ),
     bass_output: Optional[str] = typer.Option(
         "IAC Driver Bus 2",
         "--bass-output",
-        help="MIDI output port for the reactive bass variation (captured from "
-        "Logic channel 3). Pass an empty string (--bass-output '') to disable it.",
+        help="MIDI output port for the generated bassline (root & fifth "
+        "following the chords). Pass an empty string (--bass-output '') to disable it.",
     ),
     bass_channel: int = typer.Option(
         2,
@@ -202,10 +196,10 @@ def live(
         help="MIDI channel for bass output, 0-indexed (default 2 = channel 3 in Logic)",
     ),
     bass_variation: float = typer.Option(
-        0.3,
+        0.0,
         "--bass-variation",
-        help="How far the bass departs from the captured line: "
-        "0.0 = identical to the input, 1.0 = a fully reworked, kick-locked line",
+        help="Reserved seam for the upcoming per-loop bass variation. Currently "
+        "has no effect: the bass is a deterministic kick-locked root line.",
     ),
     tempo: float = typer.Option(120.0, "--tempo"),
     bars: int = typer.Option(4, "--bars"),
@@ -237,21 +231,20 @@ def live(
 
     # Load and validate GMD-trained styles up front (no hardware needed).
     drum_markov = None
-    if drum_style or bass_style:
+    if drum_style:
         drum_markov = MarkovDrumModel.load()
         if drum_markov is None:
             raise typer.BadParameter(
                 "No trained groove tables found. Run scripts/train_groove.py first."
             )
         available = drum_markov.styles()
-        if drum_style == "list" or bass_style == "list":
+        if drum_style == "list":
             typer.echo("Available styles: " + ", ".join(available))
             raise typer.Exit()
-        for label in (drum_style, bass_style):
-            if label and label not in available:
-                raise typer.BadParameter(
-                    f"Unknown style '{label}'. Choose from: {', '.join(available)}"
-                )
+        if drum_style not in available:
+            raise typer.BadParameter(
+                f"Unknown style '{drum_style}'. Choose from: {', '.join(available)}"
+            )
 
     midi_in = MidiInputAdapter(midi_input)
     midi_out = MidiOutputAdapter(midi_output)
@@ -297,9 +290,8 @@ def live(
 
         drum_generator = RuleBasedDrumGenerator() if drum_out else None
         drum_scheduler = ClipScheduler(drum_out, context) if drum_out else None
-        bass_generator = RuleBasedBassGenerator() if bass_out else None
+        bass_generator = BassGenerator() if bass_out else None
         bass_scheduler = ClipScheduler(bass_out, context) if bass_out else None
-        effective_bass_style = bass_style or drum_style
 
         def start_drums(melody: MelodyClip, start_at: float, iteration: int):
             """Generate drums for this loop and play them in a background thread
@@ -319,15 +311,14 @@ def live(
             return thread, drum_clip, len(drum_clip.hits)
 
         def start_bass(melody: MelodyClip, drum_clip, start_at: float, iteration: int):
-            """Generate a bass line following `melody` and locked to `drum_clip`'s
-            kick, and play it in a background thread aligned to `start_at`.
+            """Generate a bass line locked to `drum_clip`'s kick and following the
+            chords, and play it in a background thread aligned to `start_at`.
             Returns (thread, note_count); (None, 0) if disabled."""
             if not bass_scheduler:
                 return None, 0
             opts = BassOptions(
                 seed=None if seed is None else seed + iteration,
                 variation=bass_variation,
-                style=effective_bass_style,
             )
             bass_clip = bass_generator.generate(context, melody, drum_clip, opts)
             thread = threading.Thread(target=bass_scheduler.play, args=(bass_clip.notes, start_at), daemon=True)
@@ -338,8 +329,10 @@ def live(
             how = f"style '{drum_style}'" if drum_style else f"variation {drum_variation:.2f}"
             typer.echo(f"Reactive drums -> '{drum_output}' (channel {drum_channel + 1}), {how}.")
         if bass_out:
-            how = f"style '{effective_bass_style}'" if effective_bass_style else f"variation {bass_variation:.2f}"
-            typer.echo(f"Reactive bass  -> '{bass_output}' (channel {bass_channel + 1}), {how}.")
+            typer.echo(
+                f"Reactive bass  -> '{bass_output}' (channel {bass_channel + 1}), "
+                f"root & fifth, following the chords."
+            )
 
         if continuous:
             typer.echo(

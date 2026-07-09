@@ -4,8 +4,6 @@ Loads the committed JSON tables and provides:
 - MarkovDrumModel: generate a drum groove in a learned style (the drum "style"
   generation mode), via a position-conditioned Markov chain over 16th-note
   instrument tokens, with velocities sampled from the dataset.
-- style_bass_template(): the characteristic kick rhythm of a style, turned into
-  bass groove slots (data-driven bass rhythm).
 
 Data derived from the Groove MIDI Dataset (Magenta), CC-BY-4.0.
 """
@@ -104,31 +102,3 @@ class MarkovDrumModel:
                         hits.append(DrumHit(pitch, vel, bar, position))
                 prev = token
         return DrumClip(bars=bars, hits=sorted(hits, key=lambda h: (h.bar, float(h.position), h.pitch)))
-
-
-KICK_TEMPLATE_THRESHOLD = 0.25  # kick appears this often across the corpus -> a bass slot
-
-
-def style_bass_template(style: str, beats_per_bar: int):
-    """The style's characteristic kick rhythm as bass groove slots, or None if
-    unavailable. Returns a list of GrooveSlot (imported lazily to avoid a cycle)."""
-    data = _load("groove_bass_templates.json")
-    if not data:
-        return None
-    table = _style_table(data["styles"], style)
-    if not table:
-        return None
-    from .bass import GrooveSlot
-
-    steps_per_beat = data["meta"]["steps_per_beat"]
-    freq = table["kick_freq"]
-    peak = max(freq) or 1.0
-    slots = []
-    for step, f in enumerate(freq):
-        on_beat = step % steps_per_beat == 0
-        if f >= KICK_TEMPLATE_THRESHOLD or on_beat:
-            slots.append(GrooveSlot(Fraction(step, steps_per_beat), min(1.0, f / peak + (0.3 if on_beat else 0.0)), on_beat))
-    # guarantee a downbeat anchor
-    if not any(s.position == 0 for s in slots):
-        slots.insert(0, GrooveSlot(Fraction(0), 1.0, True))
-    return slots
