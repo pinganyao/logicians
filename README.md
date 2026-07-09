@@ -75,6 +75,7 @@ python -m logicians.cli live \
 ```
 
 Workflow:
+
 1. Run the command — it waits (no timer yet)
 2. Switch to Logic and press Play
 3. **Loop 1** — first MIDI note syncs to bar 1; loop is captured
@@ -100,13 +101,15 @@ The `MelodyGenerator` protocol allows swapping the rule-based generator for a fu
 
 ## CLI Commands
 
-| Command | Description |
-|---------|-------------|
-| `analyze` | Print tempo, key, chords, density |
-| `generate` | Create melody MIDI file |
-| `ports` | List MIDI I/O ports |
-| `play` | Generate and send melody live |
-| `live` | Capture loop and play generated melody |
+
+| Command    | Description                            |
+| ---------- | -------------------------------------- |
+| `analyze`  | Print tempo, key, chords, density      |
+| `generate` | Create melody MIDI file                |
+| `ports`    | List MIDI I/O ports                    |
+| `play`     | Generate and send melody live          |
+| `live`     | Capture loop and play generated melody |
+
 
 Use `--key` to match Logic's project key (e.g. `--key Am`, `--key D`). When set, the melody is strictly diatonic to that key — no chromatic passing tones.
 
@@ -132,3 +135,4 @@ the-logicians/
   tests/
   examples/
 ```
+
