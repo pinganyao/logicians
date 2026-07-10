@@ -321,12 +321,24 @@ def live(
 def serve(
     host: str = typer.Option("127.0.0.1", "--host", help="Host to bind the web server"),
     port: int = typer.Option(8765, "--port", help="Port for the web server"),
+    browser: bool = typer.Option(
+        False,
+        "--browser",
+        help="Open in the system browser instead of a native app window",
+    ),
 ) -> None:
-    """Start the live improvisation web UI."""
-    import uvicorn
+    """Start the live improvisation UI (native app window by default)."""
+    if browser:
+        import uvicorn
 
-    typer.echo(f"Open http://{host}:{port} in your browser.")
-    uvicorn.run("logicians.server:app", host=host, port=port, reload=False)
+        typer.echo(f"Open http://{host}:{port} in your browser.")
+        uvicorn.run("logicians.server:app", host=host, port=port, reload=False)
+        return
+
+    from .desktop import run_desktop_window
+
+    typer.echo("Opening The Logicians…")
+    run_desktop_window(host, port)
 
 
 def main() -> None:

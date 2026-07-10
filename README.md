@@ -90,19 +90,20 @@ Live capture splits bass (notes below E3) from harmony automatically. Keep bass 
 
 ### Live performance UI
 
-For performance use, start the local web interface instead of the CLI `live` command:
+For performance use, start the local app — it opens in a native window (no browser needed):
 
 ```bash
 logicians serve
-# Open http://127.0.0.1:8765
 ```
+
+Use `logicians serve --browser` if you prefer the system browser at http://127.0.0.1:8765 instead.
 
 **Important:** Tempo, bars, time signature, and key in the UI must match your Logic project.
 
 Workflow:
 
 1. Build your loop in Logic (do not start improvising yet).
-2. Run `logicians serve` and open the UI in a browser (works well on a second screen or iPad).
+2. Run `logicians serve` — a compact app window opens (works well on a second screen or iPad via browser with `--browser`).
 3. Enter settings (MIDI ports, tempo, bars, key, etc.) and press **Start Session**.
 4. Switch to Logic and press Play — the first MIDI note syncs the loop clock.
 5. Keep looping as long as you need while building or rehearsing.

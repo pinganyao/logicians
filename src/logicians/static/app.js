@@ -10,8 +10,15 @@ const btnImprovise = document.getElementById("btn-improvise");
 const btnStop = document.getElementById("btn-stop");
 const btnReset = document.getElementById("btn-reset");
 
+const statusDot = document.getElementById("status-dot");
 const statusState = document.getElementById("status-state");
 const statusPosition = document.getElementById("status-position");
+const posLoop = document.getElementById("pos-loop");
+const posBar = document.getElementById("pos-bar");
+const posBeat = document.getElementById("pos-beat");
+const beatTrack = document.getElementById("beat-track");
+const beatTicks = beatTrack ? [...beatTrack.children] : [];
+
 const statusKey = document.getElementById("status-key");
 const keyLabel = document.getElementById("key-label");
 const statusChords = document.getElementById("status-chords");
@@ -20,6 +27,11 @@ const statusError = document.getElementById("status-error");
 const statusWarning = document.getElementById("status-warning");
 
 let pollTimer = null;
+
+function formatState(state) {
+  if (!state) return "Idle";
+  return state.charAt(0).toUpperCase() + state.slice(1).replace(/-/g, " ");
+}
 
 function setSettingsDisabled(disabled) {
   form.querySelectorAll("input, select").forEach((el) => {
@@ -108,15 +120,40 @@ function updateButtons(state) {
   setSettingsDisabled(state !== "idle" && state !== "stopped");
 }
 
+function beatsPerBar(timeSignature) {
+  const select = document.getElementById("time-signature");
+  const ts = timeSignature || select?.value || "4/4";
+  if (ts === "6/8") return 2;
+  const num = Number(ts.split("/")[0]);
+  return Number.isFinite(num) && num > 0 ? num : 4;
+}
+
+function updateBeatTrack(beat, beatsInBar, visible) {
+  if (!beatTrack) return;
+  beatTrack.classList.toggle("visible", visible);
+  const count = Math.min(beatTicks.length, beatsInBar);
+  beatTicks.forEach((tick, i) => {
+    tick.classList.toggle("active", visible && i < count && i + 1 === beat);
+    tick.style.display = i < count ? "" : "none";
+  });
+}
+
 function updateStatus(data) {
   if (!data) return;
-  statusState.textContent = data.state || "unknown";
-  updateButtons(data.state || "idle");
+  const state = data.state || "idle";
+  statusState.textContent = formatState(state);
+  statusDot.dataset.state = state;
+  updateButtons(state);
 
   if (data.loop > 0) {
-    statusPosition.textContent = ` · Loop ${data.loop} · Bar ${data.bar} · Beat ${data.beat}`;
+    statusPosition.hidden = false;
+    posLoop.textContent = data.loop;
+    posBar.textContent = data.bar;
+    posBeat.textContent = data.beat;
+    updateBeatTrack(data.beat, beatsPerBar(data.time_signature), true);
   } else {
-    statusPosition.textContent = "";
+    statusPosition.hidden = true;
+    updateBeatTrack(0, 4, false);
   }
 
   if (data.key_label && data.state !== "capturing" && data.state !== "arming") {
@@ -128,9 +165,10 @@ function updateStatus(data) {
 
   if (data.chord_progression?.length && data.state !== "capturing" && data.state !== "arming") {
     statusChords.hidden = false;
-    statusChords.textContent = data.chord_progression.join(" | ");
+    statusChords.textContent = data.chord_progression.join("  ·  ");
   } else {
     statusChords.hidden = true;
+    statusChords.textContent = "";
   }
 
   statusMessage.hidden = !data.message;

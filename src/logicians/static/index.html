@@ -3,130 +3,188 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>The Logicians — Live</title>
+  <title>The Logicians</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1>The Logicians — Live</h1>
-      <p>Sync with Logic, then improvise melody, drums, and bass over your loop.</p>
+  <div class="app">
+    <div class="ambient" aria-hidden="true"></div>
+
+    <header class="header">
+      <h1><span class="the">The</span> Logicians</h1>
+      <p>Live improvisation for Logic Pro</p>
     </header>
 
-    <section id="settings-section">
-      <h2>Settings</h2>
-      <form id="settings-form" class="grid">
-        <label>
-          MIDI Input
-          <select id="midi-input" name="midi_input" required></select>
-        </label>
-        <label>
-          MIDI Output (melody)
-          <select id="midi-output" name="midi_output" required></select>
-        </label>
-        <label>
-          Tempo (BPM)
-          <input type="number" id="tempo" name="tempo" value="120" min="40" max="300" step="1" required>
-        </label>
-        <label>
-          Bars
-          <input type="number" id="bars" name="bars" value="4" min="1" max="32" step="1" required>
-        </label>
-        <label>
-          Key
-          <input type="text" id="key" name="key" placeholder="e.g. F, Am, D minor">
-        </label>
-        <label>
-          Density
-          <select id="density" name="density">
-            <option value="sparse">Sparse</option>
-            <option value="medium" selected>Medium</option>
-            <option value="busy">Busy</option>
-          </select>
-        </label>
-        <label>
-          Time Signature
-          <select id="time-signature" name="time_signature">
-            <option value="4/4" selected>4/4</option>
-            <option value="3/4">3/4</option>
-            <option value="6/8">6/8</option>
-          </select>
-        </label>
-        <label>
-          <span>&nbsp;</span>
-          <label style="flex-direction: row; align-items: center; gap: 0.5rem; color: #e8eaed;">
-            <input type="checkbox" id="continuous" name="continuous" checked>
-            Continuous improvisation
-          </label>
-        </label>
+    <section class="status" id="status-section">
+      <div class="status-main">
+        <div class="status-left">
+          <span class="status-dot" id="status-dot" data-state="idle"></span>
+          <span class="status-label" id="status-state">Idle</span>
+        </div>
+        <div class="status-position" id="status-position" hidden>
+          Loop <span id="pos-loop">—</span>
+          <span class="sep">·</span>
+          Bar <span id="pos-bar">—</span>
+          <span class="sep">·</span>
+          Beat <span id="pos-beat">—</span>
+        </div>
+      </div>
+      <div class="beat-track" id="beat-track" aria-hidden="true">
+        <span></span><span></span><span></span><span></span>
+      </div>
+      <div class="status-meta" id="status-key" hidden>
+        <span class="meta-label">Key</span>
+        <span id="key-label"></span>
+      </div>
+      <p class="status-chords" id="status-chords" hidden></p>
+      <p class="feedback message" id="status-message" hidden></p>
+      <p class="feedback error" id="status-error" hidden></p>
+      <p class="feedback warning" id="status-warning" hidden></p>
+    </section>
 
-        <details class="full">
-          <summary>Advanced options</summary>
-          <div class="grid">
-            <label>
-              Drum Output
-              <select id="drum-output" name="drum_output"></select>
-            </label>
-            <label>
-              Drum Channel (0-indexed)
-              <input type="number" id="drum-channel" name="drum_channel" value="1" min="0" max="15">
-            </label>
-            <label>
-              Drum Variation
-              <input type="number" id="drum-variation" name="drum_variation" value="0.3" min="0" max="1" step="0.05">
-            </label>
-            <label>
-              Drum Style
-              <select id="drum-style" name="drum_style">
-                <option value="">Vary captured groove</option>
+    <div class="actions">
+      <button type="button" class="btn primary" id="btn-start">Start Session</button>
+      <button type="button" class="btn default" id="btn-improvise" disabled>Improvise</button>
+      <div class="actions-row">
+        <button type="button" class="btn subtle" id="btn-stop" disabled>Stop</button>
+        <button type="button" class="btn subtle" id="btn-reset" disabled>Reset</button>
+      </div>
+    </div>
+
+    <section class="settings" id="settings-section">
+      <h2>Session</h2>
+      <form id="settings-form">
+        <div class="group">
+          <div class="row">
+            <label for="midi-input">MIDI Input</label>
+            <div class="control">
+              <select id="midi-input" name="midi_input" required></select>
+            </div>
+          </div>
+          <div class="row">
+            <label for="midi-output">MIDI Output</label>
+            <div class="control">
+              <select id="midi-output" name="midi_output" required></select>
+            </div>
+          </div>
+        </div>
+
+        <div class="group">
+          <div class="row">
+            <label for="tempo">Tempo</label>
+            <div class="control control-narrow">
+              <input type="number" id="tempo" name="tempo" value="120" min="40" max="300" step="1" required>
+              <span class="suffix">BPM</span>
+            </div>
+          </div>
+          <div class="row">
+            <label for="bars">Bars</label>
+            <div class="control control-narrow">
+              <input type="number" id="bars" name="bars" value="4" min="1" max="32" step="1" required>
+            </div>
+          </div>
+          <div class="row">
+            <label for="key">Key</label>
+            <div class="control">
+              <input type="text" id="key" name="key" placeholder="F, Am, D minor">
+            </div>
+          </div>
+          <div class="row">
+            <label for="density">Density</label>
+            <div class="control">
+              <select id="density" name="density">
+                <option value="sparse">Sparse</option>
+                <option value="medium" selected>Medium</option>
+                <option value="busy">Busy</option>
               </select>
-            </label>
-            <label>
-              Bass Output
-              <select id="bass-output" name="bass_output"></select>
-            </label>
-            <label>
-              Bass Channel (0-indexed)
-              <input type="number" id="bass-channel" name="bass_channel" value="2" min="0" max="15">
-            </label>
-            <label>
-              Seed
-              <input type="number" id="seed" name="seed" placeholder="Random">
-            </label>
-            <label>
-              Playback Loop
-              <input type="number" id="playback-loop" name="playback_loop" value="3" min="1" max="20">
-            </label>
-            <label>
-              Count-in Loops
-              <input type="number" id="count-in" name="count_in" value="0" min="0" max="10">
-            </label>
+            </div>
+          </div>
+          <div class="row">
+            <label for="time-signature">Time Signature</label>
+            <div class="control">
+              <select id="time-signature" name="time_signature">
+                <option value="4/4" selected>4/4</option>
+                <option value="3/4">3/4</option>
+                <option value="6/8">6/8</option>
+              </select>
+            </div>
+          </div>
+          <div class="row row-toggle">
+            <label for="continuous">Continuous improvisation</label>
+            <div class="control">
+              <input type="checkbox" id="continuous" name="continuous" class="toggle" checked>
+            </div>
+          </div>
+        </div>
+
+        <details class="advanced">
+          <summary>
+            <span>Advanced options</span>
+            <svg class="chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+              <path fill="currentColor" d="M2.5 4.5 6 8l3.5-3.5"/>
+            </svg>
+          </summary>
+          <div class="group">
+            <div class="row">
+              <label for="drum-output">Drum Output</label>
+              <div class="control">
+                <select id="drum-output" name="drum_output"></select>
+              </div>
+            </div>
+            <div class="row">
+              <label for="drum-channel">Drum Channel</label>
+              <div class="control control-narrow">
+                <input type="number" id="drum-channel" name="drum_channel" value="1" min="0" max="15">
+              </div>
+            </div>
+            <div class="row">
+              <label for="drum-variation">Drum Variation</label>
+              <div class="control control-narrow">
+                <input type="number" id="drum-variation" name="drum_variation" value="0.3" min="0" max="1" step="0.05">
+              </div>
+            </div>
+            <div class="row">
+              <label for="drum-style">Drum Style</label>
+              <div class="control">
+                <select id="drum-style" name="drum_style">
+                  <option value="">Vary captured groove</option>
+                </select>
+              </div>
+            </div>
+            <div class="row">
+              <label for="bass-output">Bass Output</label>
+              <div class="control">
+                <select id="bass-output" name="bass_output"></select>
+              </div>
+            </div>
+            <div class="row">
+              <label for="bass-channel">Bass Channel</label>
+              <div class="control control-narrow">
+                <input type="number" id="bass-channel" name="bass_channel" value="2" min="0" max="15">
+              </div>
+            </div>
+            <div class="row">
+              <label for="seed">Seed</label>
+              <div class="control control-narrow">
+                <input type="number" id="seed" name="seed" placeholder="Random">
+              </div>
+            </div>
+            <div class="row">
+              <label for="playback-loop">Playback Loop</label>
+              <div class="control control-narrow">
+                <input type="number" id="playback-loop" name="playback_loop" value="3" min="1" max="20">
+              </div>
+            </div>
+            <div class="row">
+              <label for="count-in">Count-in Loops</label>
+              <div class="control control-narrow">
+                <input type="number" id="count-in" name="count_in" value="0" min="0" max="10">
+              </div>
+            </div>
           </div>
         </details>
       </form>
     </section>
-
-    <section id="status-section">
-      <h2>Status</h2>
-      <div class="status-line">
-        State: <span class="state" id="status-state">idle</span>
-        <span id="status-position"></span>
-      </div>
-      <div class="status-detail" id="status-key" hidden>
-        Key: <strong id="key-label"></strong>
-      </div>
-      <div class="chords" id="status-chords" hidden></div>
-      <div class="message" id="status-message" hidden></div>
-      <div class="error" id="status-error" hidden></div>
-      <div class="error" id="status-warning" hidden></div>
-    </section>
-
-    <div class="actions">
-      <button type="button" id="btn-start">Start Session</button>
-      <button type="button" id="btn-improvise" disabled>Improvise</button>
-      <button type="button" id="btn-stop" disabled>Stop</button>
-      <button type="button" id="btn-reset" disabled>Reset</button>
-    </div>
   </div>
 
   <script src="/static/app.js"></script>

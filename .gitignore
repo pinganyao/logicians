@@ -1,6 +1,7 @@
 # Local development
 .venv/
 .pytest_cache/
+.matplotlib/
 
 # Byte-compiled Python files
 __pycache__/
