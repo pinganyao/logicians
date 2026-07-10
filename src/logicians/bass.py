@@ -18,9 +18,11 @@ Separated concerns, each swappable on its own:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import random
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 
+from .cellular_automaton import CellularAutomatonBassGenerator
 from .drums import DrumClip
 from .models import ChordEvent, LoopContext, MelodyClip
 
@@ -45,6 +47,11 @@ FIFTH = "fifth"
 VELOCITY = {ROOT: 100, FIFTH: 86}
 DEFAULT_VELOCITY = 90
 
+# How many cellular-automaton generations to evolve before reading its state to
+# drive the per-note variations. More generations = the local root/fifth seed
+# spreads further, giving busier, less predictable lines.
+CA_GENERATIONS = 10
+
 
 # --- Data models (output format shared with the scheduler/exporter) ----------
 
@@ -68,9 +75,10 @@ class BassClip:
 class BassOptions:
     """Generation knobs.
 
-    ``seed`` and ``variation`` are seams for the upcoming per-loop variation and
-    probabilistic pitch work; this first version is deterministic and ignores
-    both."""
+    ``seed`` makes a run reproducible: it seeds the cellular automaton (and the
+    per-note random choices it drives), so the same seed yields the same
+    variation and different seeds yield different ones. ``variation`` is kept as
+    a reserved seam and is currently unused."""
 
     seed: int | None = None
     variation: float = 0.0
@@ -176,15 +184,114 @@ def approach_tone(
     return nearest_in_register(best_pc, toward, low, high)
 
 
+# --- Variation (cellular automaton) -----------------------------------------
+
+
+class BasslineEnhancer:
+    """Turns the seed line into a variation, one automaton cell per note.
+
+    Each note is transformed by the automaton's state at its index (see
+    ``CellularAutomatonBassGenerator`` for the state meanings):
+
+    - 0 keep, 1 accent (louder root)
+    - 2 octave, 3 neighbour, 4 fifth, 5 chromatic, 6 melodic leap -- pitch moves
+    - 7 rhythmic break -- split the note in two, rest out its first half, or
+      repeat it (second hit softer)
+
+    Pitch moves are folded back into the bass register so the line stays in
+    range. Rhythmic breaks keep the note's onset and split only *within* its own
+    duration, so bars never overflow.
+    """
+
+    def __init__(
+        self,
+        notes: list[BassNote],
+        automaton: CellularAutomatonBassGenerator,
+        low: int = BASS_LOW,
+        high: int = BASS_HIGH,
+    ):
+        self.notes = notes
+        self.automaton = automaton
+        self.low = low
+        self.high = high
+
+    def _shift(self, pitch: int, amount: int) -> int:
+        return clamp_to_register(pitch + amount, self.low, self.high)
+
+    def enhance(self) -> list[BassNote]:
+        out: list[BassNote] = []
+        for index, base in enumerate(self.notes):
+            state = int(self.automaton.state[index % self.automaton.length])
+            note = replace(base)
+
+            if state == 0:  # keep
+                out.append(note)
+            elif state == 1:  # accent
+                note.velocity = 120
+                out.append(note)
+            elif state == 2:  # octave jump
+                note.pitch = self._shift(note.pitch, random.choice([-12, 12]))
+                out.append(note)
+            elif state == 3:  # neighbour tone
+                note.pitch = self._shift(note.pitch, random.choice([-2, -1, 1, 2]))
+                out.append(note)
+            elif state == 4:  # fifth movement
+                note.pitch = self._shift(note.pitch, random.choice([-7, 7]))
+                out.append(note)
+            elif state == 5:  # chromatic approach
+                note.pitch = self._shift(note.pitch, random.choice([-1, 1]))
+                out.append(note)
+            elif state == 6:  # larger melodic leap
+                note.pitch = self._shift(note.pitch, random.choice([-5, -4, -3, 3, 4, 5]))
+                out.append(note)
+            elif state == 7:  # rhythmic variation
+                out.extend(self._rhythmic(note))
+        return out
+
+    def _rhythmic(self, note: BassNote) -> list[BassNote]:
+        variation = random.choice(["split", "rest", "repeat"])
+        half = note.duration / 2
+
+        if variation == "split":
+            first = replace(note, duration=half)
+            second = replace(
+                note,
+                position=note.position + half,
+                duration=half,
+                pitch=self._shift(note.pitch, random.choice([-3, 2, 4, 7])),
+            )
+            return [first, second]
+
+        if variation == "rest":
+            # First half is silence (a gap); only the second half sounds.
+            return [replace(note, position=note.position + half, duration=half)]
+
+        # repeat: two hits, the second one softer.
+        first = replace(note, duration=half)
+        second = replace(
+            note,
+            position=note.position + half,
+            duration=half,
+            velocity=max(30, note.velocity - 20),
+        )
+        return [first, second]
+
+
 # --- Generator --------------------------------------------------------------
 
 
 class BassGenerator:
-    """Root–fifth bassline: root on beat 1, fifth on beat 3, per chord.
+    """Cellular-automaton bassline.
 
-    ``generate(context, melody, drums, options)`` returns a ``BassClip``. The
-    ``melody`` and ``drums`` arguments are accepted for pipeline compatibility
-    (and as future seams) but are unused by this version.
+    A tight root–fifth line is used as the *seed* shape; a cellular automaton is
+    then evolved over it and its per-cell state drives a per-note variation
+    (accent, octave/fifth/neighbour/chromatic/leap moves, and split/rest/repeat
+    rhythmic breaks). ``generate(context, melody, drums, options)`` returns a
+    single ``BassClip`` variation -- reproducible when ``options.seed`` is set,
+    fresh each call otherwise.
+
+    The ``melody`` and ``drums`` arguments are accepted for pipeline
+    compatibility (and as future seams) but are unused by this version.
     """
 
     _low: int = BASS_LOW
@@ -197,8 +304,21 @@ class BassGenerator:
         drums: DrumClip | None = None,
         options: BassOptions | None = None,
     ) -> BassClip:
-        options = options or BassOptions()  # noqa: F841 -- reserved seam (seed/variation)
+        options = options or BassOptions()
 
+        base = self._base_notes(context)
+        automaton = CellularAutomatonBassGenerator(max(len(base), 1), seed=options.seed)
+        for _ in range(CA_GENERATIONS):
+            automaton.step()
+
+        notes = BasslineEnhancer(base, automaton, self._low, self._high).enhance()
+        return BassClip(bars=context.bars, notes=notes)
+
+    # -- base line ------------------------------------------------------------
+
+    def _base_notes(self, context: LoopContext) -> list[BassNote]:
+        """The seed root–fifth line the automaton varies: root on beat 1, fifth
+        on beat 3, per chord, voice-led and kept in the bass register."""
         beats_per_bar = context.time_signature[0]
         pattern = bass_pattern(beats_per_bar)  # RHYTHM + SHAPE
         loop_beats = context.bars * beats_per_bar
@@ -225,7 +345,8 @@ class BassGenerator:
             velocity = VELOCITY.get(degree, DEFAULT_VELOCITY)
             notes.append(BassNote(pitch, velocity, bar, position, duration))
             prev_pitch = pitch
-        return BassClip(bars=context.bars, notes=notes)
+        return notes
+
 
     # -- helpers --------------------------------------------------------------
 
