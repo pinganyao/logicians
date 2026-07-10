@@ -63,7 +63,19 @@ def _abs_beat(note, beats_per_bar=4) -> float:
 
 
 def _generate(bars: int = 4):
-    return BassGenerator().generate(_context(bars), None, None, BassOptions())
+    # Seeded so the cellular-automaton variation is reproducible: the enhancer's
+    # pitch/rhythm moves are driven by `random`, which the automaton seeds.
+    return BassGenerator().generate(_context(bars), None, None, BassOptions(seed=1234))
+
+
+def _base_line(bars: int = 4):
+    """The pre-enhancement root–fifth seed line the automaton varies.
+
+    Root/fifth placement, two-notes-per-bar shape, close voice leading, and the
+    accented downbeat are properties of this seed; the automaton deliberately
+    varies them in the enhanced output (octave jumps, neighbour tones, rhythmic
+    splits), so those structural checks target the seed line here."""
+    return BassGenerator()._base_notes(_context(bars))
 
 
 # --- rhythm / shape ---------------------------------------------------------
@@ -74,10 +86,10 @@ def test_pattern_is_root_on_one_fifth_on_three():
 
 
 def test_two_notes_per_bar_on_beats_one_and_three():
-    bass = _generate(bars=4)
-    assert len(bass.notes) == 8  # 2 per bar over 4 bars
+    notes = _base_line(bars=4)
+    assert len(notes) == 8  # 2 per bar over 4 bars
     for bar in range(1, 5):
-        positions = sorted(n.position for n in bass.notes if n.bar == bar)
+        positions = sorted(n.position for n in notes if n.bar == bar)
         assert positions == [Fraction(0), Fraction(2)]
 
 
@@ -85,16 +97,16 @@ def test_two_notes_per_bar_on_beats_one_and_three():
 
 
 def test_downbeat_plays_the_root():
-    bass = _generate()
+    notes = _base_line()
     for bar, (root, _, _) in enumerate(_PROGRESSION, start=1):
-        note = next(n for n in bass.notes if n.bar == bar and n.position == Fraction(0))
+        note = next(n for n in notes if n.bar == bar and n.position == Fraction(0))
         assert note.pitch % 12 == root
 
 
 def test_beat_three_plays_the_fifth():
-    bass = _generate()
+    notes = _base_line()
     for bar, (root, _, _) in enumerate(_PROGRESSION, start=1):
-        note = next(n for n in bass.notes if n.bar == bar and n.position == Fraction(2))
+        note = next(n for n in notes if n.bar == bar and n.position == Fraction(2))
         assert note.pitch % 12 == (root + 7) % 12  # perfect fifth
 
 
@@ -120,9 +132,10 @@ def test_clamp_folds_by_octave():
 
 
 def test_voice_leading_keeps_steps_small():
-    # Consecutive notes should not leap more than an octave (nearest-octave pick).
-    bass = sorted(_generate().notes, key=lambda n: _abs_beat(n))
-    assert all(abs(b.pitch - a.pitch) <= 12 for a, b in zip(bass, bass[1:]))
+    # The seed line should not leap more than an octave (nearest-octave pick);
+    # the automaton's enhanced output may leap further by design.
+    notes = sorted(_base_line(), key=lambda n: _abs_beat(n))
+    assert all(abs(b.pitch - a.pitch) <= 12 for a, b in zip(notes, notes[1:]))
 
 
 # --- articulation / velocity ------------------------------------------------
@@ -137,9 +150,9 @@ def test_notes_are_detached_and_never_overlap():
 
 
 def test_root_is_accented_over_the_fifth():
-    bass = _generate()
-    root_note = next(n for n in bass.notes if n.bar == 1 and n.position == Fraction(0))
-    fifth_note = next(n for n in bass.notes if n.bar == 1 and n.position == Fraction(2))
+    notes = _base_line()
+    root_note = next(n for n in notes if n.bar == 1 and n.position == Fraction(0))
+    fifth_note = next(n for n in notes if n.bar == 1 and n.position == Fraction(2))
     assert root_note.velocity == VELOCITY[ROOT]
     assert fifth_note.velocity == VELOCITY[FIFTH]
     assert root_note.velocity > fifth_note.velocity
