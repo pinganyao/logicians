@@ -1,0 +1,21 @@
+# Local development
+.venv/
+.pytest_cache/
+
+# Byte-compiled Python files
+__pycache__/
+*.py[cod]
+
+# JetBrains IDE
+.idea/
+
+# macOS
+.DS_Store
+
+# Packaging / build metadata
+*.egg-info/
+build/
+dist/
+
+# Generated MIDI output (keep the directory via .gitkeep)
+examples/generated/*.mid
