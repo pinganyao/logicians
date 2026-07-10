@@ -149,11 +149,15 @@ BASS_PITCH_SPLIT = 52  # E3 — notes below are treated as bass in mixed/live ca
 
 # Explicit channel -> role mapping for live capture. mido channels are 0-indexed,
 # so these correspond to the 1-indexed numbers shown in a DAW like Logic:
-#   channel 1 (Logic) -> 0, channel 2 (Logic) -> 1, channel 3 (Logic) -> 2
+#   channel 2 (Logic) -> 1, channel 3 (Logic) -> 2
+#
+# Channel 0 (Logic channel 1) is deliberately left out so it keeps the original
+# pitch-register split (low notes -> bass, high notes -> chords). This preserves
+# the pre-existing single-channel live-capture behaviour: the drum/bass feature
+# only *adds* explicit routing for the dedicated drum (1) and bass (2) channels.
 LIVE_CHANNEL_ROLES = {
-    0: "chords",  # Logic channel 1
-    1: "drums",   # Logic channel 2
-    2: "bass",    # Logic channel 3
+    1: "drums",  # Logic channel 2
+    2: "bass",   # Logic channel 3
 }
 
 
