@@ -1,5 +1,15 @@
 # The Logicians
 
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white)
+![Logic Pro](https://img.shields.io/badge/Logic%20Pro-FF4F00?logo=apple&logoColor=white)
+![MIDI](https://img.shields.io/badge/MIDI-Live%20I%2FO-009688?logo=musicbrainz&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![AI](https://img.shields.io/badge/AI-Melody%20Improviser-8B5CF6?logo=openai&logoColor=white)
+![Status](https://img.shields.io/badge/Status-Prototype-yellow)
+![Tests](https://img.shields.io/badge/Tests-pytest-0A9EDC?logo=pytest&logoColor=white)
+![Version](https://img.shields.io/badge/Version-0.1.0-blue)
+
 AI-assisted melody improviser for Logic Pro. This prototype implements the full pipeline with a **rule-based melody generator** as a placeholder for a future MMM-inspired Transformer model.
 
 ## Features
