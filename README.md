@@ -11,6 +11,8 @@
 
 AI-assisted melody improviser for Logic Pro. Capture a MIDI loop, analyze its harmony and rhythm, then generate human-like melodies — exported as MIDI or sent live back into Logic.
 
+Built by Patrick Yao, Oriol Garrobé Guilera, and Alfredo Zermini.
+
 ## Features
 
 - Parse MIDI loops from file or live capture
